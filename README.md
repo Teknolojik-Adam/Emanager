@@ -1,6 +1,6 @@
 # Emanager Dosya Gezgini
 
-`teny_desk`, Windows işletim sistemleri için C# ve WinForms teknolojileri kullanılarak geliştirilmiş, temel dosya yönetimi işlevlerini yerine getiren basit ve hafif bir dosya gezgini uygulamasıdır.
+`Emanager`, Windows işletim sistemleri için C# ve WinForms teknolojileri kullanılarak geliştirilmiş, temel dosya yönetimi işlevlerini yerine getiren basit ve hafif bir dosya gezgini uygulamasıdır.
 
 ## Özellikler
 
