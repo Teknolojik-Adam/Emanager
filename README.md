@@ -26,7 +26,7 @@
 ## Kurulum ve Çalıştırma
 
 1.  Bu repoyu klonlayın veya ZIP olarak indirin.
-2.  `teny_desk.sln` dosyasını Visual Studio ile açın.
+2.  `Emanager.sln` dosyasını Visual Studio ile açın.
 3.  Proje bağımlılıklarını geri yüklemek için Çözüme sağ tıklayıp "NuGet Paketlerini Geri Yükle" seçeneğini seçin.
 4.  **ÖNEMLİ:** Uygulamanın ikonları doğru görüntüleyebilmesi için, projenin çalıştığı `bin/Debug/` (veya `bin/Release/`) dizini içinde `icons` adında bir klasör oluşturmanız gerekmektedir. Projenin kaynak kodunda bulunan `Resources` klasöründeki ikonları (`.png` dosyaları) bu `icons` klasörüne kopyalayın.
 5.  Projeyi derlemek ve başlatmak için `F5` tuşuna basın veya "Başlat" düğmesine tıklayın.
