@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
@@ -11,11 +12,10 @@ namespace teny_desk
 {
     public partial class Form1 : Form
     {
-        private string filepack = "C:\\";
-        private bool isfile = false;
-        private string SelectedItemName = "";
-        private int currentSortColumn = 0;
-        private SortOrder currentSortOrder = SortOrder.Ascending;
+        private string currentPath = "C:\\";
+        private List<ListViewItem> allItemsCache = new List<ListViewItem>();
+        private bool isDarkMode = false;
+        private const string searchPlaceholder = "Ara...";
 
         public Form1()
         {
@@ -29,143 +29,165 @@ namespace teny_desk
         {
             try
             {
-                string iconDirectory = Path.Combine(Application.StartupPath, "icons");
-
+                string iconDirectory = Path.Combine(Application.StartupPath, "Resources");
                 if (!Directory.Exists(iconDirectory))
                 {
-                    MessageBox.Show($"İkon dizini bulunamadı. Lütfen şuraya oluşturun:\n{iconDirectory}",
-                        "İkon Hatası", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageBox.Show($"İkon dizini bulunamadı: {iconDirectory}", "İkon Hatası", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
-
-                iconlist.ImageSize = new Size(32, 32);
+                iconlist.ImageSize = new Size(24, 24);
                 iconlist.ColorDepth = ColorDepth.Depth32Bit;
-
-                var imageFiles = new[]
-                {
-                    "archive.png", "doc.png", "exe.png", "folder.png", "gif.png",
-                    "jpg.png", "pdf.png", "picture.png", "tex.png", "dll.png",
-                    "xls.png", "xml.png", "video.png", "REG.png", "mp3.png",
-                    "3gp.png", "aacfile.png", "avatar.png"
-                };
-
+                var imageFiles = Directory.GetFiles(iconDirectory, "*.png");
                 foreach (var file in imageFiles)
                 {
-                    string filePath = Path.Combine(iconDirectory, file);
-                    if (File.Exists(filePath))
-                        iconlist.Images.Add(Image.FromFile(filePath));
+                    iconlist.Images.Add(Path.GetFileNameWithoutExtension(file), Image.FromFile(file));
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show("İkonlar yüklenemedi: " + ex.Message,
-                    "İkon Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show("İkonlar yüklenemedi: " + ex.Message, "İkon Hatası", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
-        private void Form1_Load(object sender, EventArgs e)
+        private async void Form1_Load(object sender, EventArgs e)
         {
-            filetexbox.Text = filepack;
+            filetexbox.Text = currentPath;
+            txtSearch.Text = searchPlaceholder;
+            txtSearch.ForeColor = Color.Gray;
             LoadDrives();
+            ApplyTheme(); // İlk temayı uygula
+            await LoadFilesAndFoldersAsync();
         }
+
+        #region Theme Management
+
+        private void ApplyTheme()
+        {
+          
+            ITheme theme = isDarkMode ? (ITheme)DarkTheme.Instance : (ITheme)LightTheme.Instance;
+
+            this.BackColor = theme.BackColor;
+            this.ForeColor = theme.ForeColor;
+
+            
+            toolStrip1.BackColor = theme.BackColor;
+            toolStrip1.ForeColor = theme.ForeColor;
+            statusStrip1.BackColor = theme.BackColor;
+            statusStrip1.ForeColor = theme.ForeColor;
+            panelNav.BackColor = theme.BackColor;
+
+          
+            listView1.BackColor = theme.BackColor;
+            listView1.ForeColor = theme.ForeColor;
+
+            
+            ApplyControlTheme(filetexbox, theme);
+            ApplyControlTheme(txtSearch, theme);
+            ApplyControlTheme(comboBoxDrives, theme);
+
+           
+            contextMenuStrip1.BackColor = theme.BackColor;
+            contextMenuStrip1.ForeColor = theme.ForeColor;
+
+            
+            foreach (ToolStripItem item in toolStrip1.Items)
+            {
+                item.ForeColor = theme.ForeColor;
+            }
+        }
+
+        private void ApplyControlTheme(Control ctrl, ITheme theme)
+        {
+            ctrl.BackColor = theme.TextBoxBackColor;
+            ctrl.ForeColor = theme.ForeColor;
+        }
+
+        private void btnToggleTheme_Click(object sender, EventArgs e)
+        {
+            isDarkMode = !isDarkMode;
+            btnToggleTheme.Text = isDarkMode ? "Açık Mod" : "Karanlık Mod";
+            ApplyTheme();
+        }
+
+        #endregion
 
         private void LoadDrives()
         {
-            comboBox1.Items.Clear();
-            DriveInfo[] allDrives = DriveInfo.GetDrives();
-            foreach (DriveInfo d in allDrives)
+            comboBoxDrives.Items.Clear();
+            try
             {
-                comboBox1.Items.Add(d.Name);
+                DriveInfo[] allDrives = DriveInfo.GetDrives();
+                foreach (DriveInfo d in allDrives)
+                {
+                    if (d.IsReady) comboBoxDrives.Items.Add(d.Name);
+                }
+                if (comboBoxDrives.Items.Count > 0) comboBoxDrives.SelectedIndex = 0;
             }
-            if (comboBox1.Items.Count > 0)
-                comboBox1.SelectedIndex = 0;
+            catch (Exception ex)
+            {
+                MessageBox.Show("Sürücüler yüklenirken hata: " + ex.Message, "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
-        private async Task loadfile_async()
+        private async Task LoadFilesAndFoldersAsync()
         {
             try
             {
-                if (isfile)
-                {
-                    OpenSelectedFile();
-                    return;
-                }
-
-                string currentPath = filepack;
                 if (!Directory.Exists(currentPath))
                 {
-                    MessageBox.Show("Dizin bulunamadı: " + currentPath,
-                        "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show("Dizin bulunamadı: " + currentPath, "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    await GoBackAsync();
                     return;
                 }
-
                 toolStripStatusLabel1.Text = "Yükleniyor...";
-                listView1.Items.Clear();
                 this.Cursor = Cursors.WaitCursor;
+                allItemsCache.Clear();
 
                 List<ListViewItem> items = await Task.Run(() =>
                 {
                     var itemList = new List<ListViewItem>();
-                    DirectoryInfo directoryInfo = new DirectoryInfo(currentPath);
-
-                    if (directoryInfo.Parent != null)
+                    var dirInfo = new DirectoryInfo(currentPath);
+                    if (dirInfo.Parent != null)
                     {
-                        var parentItem = new ListViewItem("..");
-                        parentItem.SubItems.Add("");
-                        parentItem.SubItems.Add("Klasör");
-                        parentItem.SubItems.Add("");
-                        parentItem.SubItems.Add("");
-                        parentItem.ImageIndex = 3;
+                        var parentItem = new ListViewItem("..", "folder");
+                        parentItem.SubItems.AddRange(new[] { "", "Klasör", "" });
                         itemList.Add(parentItem);
                     }
-
                     try
                     {
-                        foreach (var dir in directoryInfo.GetDirectories())
+                        foreach (var dir in dirInfo.GetDirectories())
                         {
-                            var item = new ListViewItem(dir.Name);
-                            item.SubItems.Add("");
-                            item.SubItems.Add("Klasör");
-                            item.SubItems.Add(dir.LastWriteTime.ToString("yyyy-MM-dd HH:mm"));
-                            item.SubItems.Add(dir.Attributes.ToString());
-                            item.ImageIndex = 3;
+                            var item = new ListViewItem(dir.Name, "folder");
+                            item.SubItems.AddRange(new[] { "", "Klasör", dir.LastWriteTime.ToString("yyyy-MM-dd HH:mm") });
                             itemList.Add(item);
                         }
                     }
                     catch (UnauthorizedAccessException) { }
-
                     try
                     {
-                        foreach (var file in directoryInfo.GetFiles())
+                        foreach (var file in dirInfo.GetFiles())
                         {
-                            string extension = file.Extension.ToUpper();
-                            int iconIndex = GetIconIndex(extension);
-
-                            var item = new ListViewItem(file.Name);
-                            item.SubItems.Add(FormatFileSize(file.Length));
-                            string typeName = extension.Length > 1 ? extension.Substring(1) + " Dosyası" : "Dosya";
-                            item.SubItems.Add(typeName);
-                            item.SubItems.Add(file.LastWriteTime.ToString("yyyy-MM-dd HH:mm"));
-                            item.SubItems.Add(file.Attributes.ToString());
-                            item.ImageIndex = iconIndex;
+                            string ext = file.Extension.ToLower().Replace(".", "");
+                            string iconKey = iconlist.Images.ContainsKey(ext) ? ext : "picture";
+                            var item = new ListViewItem(file.Name, iconKey);
+                            item.SubItems.AddRange(new[] { FormatFileSize(file.Length), GetFileTypeName(file.Extension), file.LastWriteTime.ToString("yyyy-MM-dd HH:mm") });
                             itemList.Add(item);
                         }
                     }
                     catch (UnauthorizedAccessException) { }
-
                     return itemList;
                 });
 
                 listView1.BeginUpdate();
+                listView1.Items.Clear();
+                allItemsCache.AddRange(items);
                 listView1.Items.AddRange(items.ToArray());
                 listView1.EndUpdate();
-
                 UpdateStatusBar();
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Dizin yüklenirken hata: {ex.Message}",
-                    "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Dizin yüklenirken hata: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
@@ -173,80 +195,20 @@ namespace teny_desk
             }
         }
 
-        private int GetIconIndex(string extension)
-        {
-            switch (extension)
-            {
-                case ".ZIP": case ".RAR": case ".ISO": case ".7Z": return 0;
-                case ".DOCX": case ".DOC": return 1;
-                case ".EXE": case ".COM": case ".BAT": return 2;
-                case ".GIF": return 4;
-                case ".JPG": case ".JPEG": return 5;
-                case ".PDF": return 6;
-                case ".PNG": case ".BMP": case ".TIFF": return 7;
-                case ".TEXT": case ".TXT": case ".CS": case ".CPP": return 8;
-                case ".DLL": return 9;
-                case ".XLS": case ".XLSX": return 10;
-                case ".XML": return 11;
-                case ".MP4": case ".AVI": case ".MKV": case ".MOV": return 12;
-                case ".REG": return 13;
-                case ".MP3": case ".MP2": case ".WAV": return 14;
-                case ".3GP": return 15;
-                case ".AAC": return 16;
-                case ".CVS": return 17;
-                default: return 7;
-            }
-        }
-
+        private string GetFileTypeName(string extension) => extension.Length > 1 ? $"{extension.Substring(1).ToUpper()} Dosyası" : "Dosya";
         private string FormatFileSize(long bytes)
         {
+            if (bytes == 0) return "0 B";
             string[] sizes = { "B", "KB", "MB", "GB", "TB" };
-            int order = 0;
-            double len = bytes;
-            while (len >= 1024 && order < sizes.Length - 1)
-            {
-                order++;
-                len = len / 1024;
-            }
-            return $"{len:0.##} {sizes[order]}";
+            int order = (int)Math.Floor(Math.Log(bytes, 1024));
+            return $"{Math.Round(bytes / Math.Pow(1024, order), 1)} {sizes[order]}";
         }
-
         private void UpdateStatusBar()
         {
-            int folderCount = 0;
-            int fileCount = 0;
-
-            foreach (ListViewItem item in listView1.Items)
-            {
-                if (item.Text == "..") continue;
-                if (item.SubItems[2].Text == "Klasör")
-                    folderCount++;
-                else
-                    fileCount++;
-            }
-
+            int folderCount = allItemsCache.Count(item => item.SubItems[2].Text == "Klasör" && item.Text != "..");
+            int fileCount = allItemsCache.Count - folderCount - (allItemsCache.Any(i => i.Text == "..") ? 1 : 0);
             toolStripStatusLabel1.Text = $"{folderCount} klasör, {fileCount} dosya";
-            toolStripStatusLabel2.Text = filepack;
-        }
-
-        private void OpenSelectedFile()
-        {
-            if (string.IsNullOrEmpty(SelectedItemName)) return;
-
-            string fullFilePath = Path.Combine(filepack, SelectedItemName);
-
-            if (File.Exists(fullFilePath))
-            {
-                try
-                {
-                    Process.Start(new ProcessStartInfo(fullFilePath) { UseShellExecute = true });
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Dosya açılamadı: {ex.Message}",
-                        "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
+            toolStripStatusLabel2.Text = currentPath;
         }
 
         private async void listView1_DoubleClick(object sender, EventArgs e)
@@ -254,266 +216,187 @@ namespace teny_desk
             if (listView1.SelectedItems.Count > 0)
             {
                 string selectedName = listView1.SelectedItems[0].Text;
+                if (selectedName == "..") { await GoBackAsync(); return; }
 
-                if (selectedName == "..")
-                {
-                    await gback();
-                    return;
-                }
-
-                string fullPath = Path.Combine(filepack, selectedName);
-
+                string fullPath = Path.Combine(currentPath, selectedName);
                 if (Directory.Exists(fullPath))
                 {
-                    filepack = fullPath;
-                    filetexbox.Text = filepack;
-                    isfile = false;
-                    await loadfile_async();
+                    currentPath = fullPath;
+                    filetexbox.Text = currentPath;
+                    await LoadFilesAndFoldersAsync();
                 }
                 else if (File.Exists(fullPath))
                 {
-                    SelectedItemName = selectedName;
-                    OpenSelectedFile();
+                    try { Process.Start(new ProcessStartInfo(fullPath) { UseShellExecute = true }); }
+                    catch (Exception ex) { MessageBox.Show($"Dosya açılamadı: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error); }
                 }
             }
         }
 
-        private void listView1_ColumnClick(object sender, ColumnClickEventArgs e)
-        {
-            if (e.Column == currentSortColumn)
-            {
-                currentSortOrder = (currentSortOrder == SortOrder.Ascending) ? SortOrder.Descending : SortOrder.Ascending;
-            }
-            else
-            {
-                currentSortColumn = e.Column;
-                currentSortOrder = SortOrder.Ascending;
-            }
-
-            listView1.ListViewItemSorter = new ListViewItemComparer(e.Column, currentSortOrder);
-            listView1.Sort();
-        }
-
-        private async void DeleteSelectedItem()
-        {
-            if (listView1.SelectedItems.Count == 0) return;
-
-            string selectedName = listView1.SelectedItems[0].Text;
-            if (selectedName == "..") return;
-
-            string fullPath = Path.Combine(filepack, selectedName);
-            string itemType = Directory.Exists(fullPath) ? "klasör" : "dosya";
-
-            var result = MessageBox.Show($"Bu {itemType} silinsin mi?\n{selectedName}",
-                "Silme Onayı", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-
-            if (result == DialogResult.Yes)
-            {
-                try
-                {
-                    if (Directory.Exists(fullPath))
-                        Directory.Delete(fullPath, true);
-                    else
-                        File.Delete(fullPath);
-
-                    await loadfile_async();
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"{itemType} silinirken hata: {ex.Message}",
-                        "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-        }
-
-        private async void Form1_KeyDown(object sender, KeyEventArgs e)
-        {
-            switch (e.KeyCode)
-            {
-                case Keys.F5:
-                    await loadfile_async();
-                    break;
-                case Keys.Back:
-                    await gback();
-                    break;
-                case Keys.Delete:
-                    DeleteSelectedItem();
-                    break;
-                case Keys.Enter:
-                    listView1_DoubleClick(sender, e);
-                    break;
-            }
-        }
-
-        private async void geributton_Click(object sender, EventArgs e)
-        {
-            await gback();
-        }
-
-        private async Task gback()
+        private async Task GoBackAsync()
         {
             try
             {
-                string currentPath = filepack;
                 if (currentPath.Length <= 3) return;
-
                 string parentPath = Directory.GetParent(currentPath)?.FullName;
-                if (Directory.Exists(parentPath))
+                if (!string.IsNullOrEmpty(parentPath) && Directory.Exists(parentPath))
                 {
-                    filepack = parentPath;
-                    filetexbox.Text = filepack;
-                    isfile = false;
-                    await loadfile_async();
+                    currentPath = parentPath;
+                    filetexbox.Text = currentPath;
+                    await LoadFilesAndFoldersAsync();
                 }
             }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Geri gidilirken hata: {ex.Message}",
-                    "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+            catch (Exception ex) { MessageBox.Show($"Geri gidilirken hata: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         }
 
-     
-
-        private async void loadbuttonaction()
+        private void GoToPath()
         {
             if (Directory.Exists(filetexbox.Text))
             {
-                filepack = filetexbox.Text;
-                isfile = false;
-                await loadfile_async();
+                currentPath = filetexbox.Text;
+                LoadFilesAndFoldersAsync();
             }
-            else
+            else { MessageBox.Show("Dizin mevcut değil!", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        }
+
+        #region Event Handlers
+        private void txtSearch_Enter(object sender, EventArgs e)
+        {
+            if (txtSearch.Text == searchPlaceholder) { txtSearch.Text = ""; txtSearch.ForeColor = isDarkMode ? Color.White : Color.Black; }
+        }
+        private void txtSearch_Leave(object sender, EventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(txtSearch.Text)) { txtSearch.Text = searchPlaceholder; txtSearch.ForeColor = Color.Gray; }
+        }
+        private void filetexbox_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter) { GoToPath(); e.SuppressKeyPress = true; }
+        }
+        private async void geributton_Click(object sender, EventArgs e) => await GoBackAsync();
+        private async void toolStripButtonRefresh_Click(object sender, EventArgs e) => await LoadFilesAndFoldersAsync();
+        private void openToolStripMenuItem_Click(object sender, EventArgs e) => listView1_DoubleClick(sender, e);
+        private async void toolStripButtonDelete_Click(object sender, EventArgs e)
+        {
+            if (listView1.SelectedItems.Count == 0 || listView1.SelectedItems[0].Text == "..") return;
+            string fullPath = Path.Combine(currentPath, listView1.SelectedItems[0].Text);
+            if (MessageBox.Show($"Bu öğe silinsin mi?\n{fullPath}", "Silme Onayı", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
             {
-                MessageBox.Show("Dizin mevcut değil!",
-                    "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                try
+                {
+                    if (Directory.Exists(fullPath)) Directory.Delete(fullPath, true); else File.Delete(fullPath);
+                    await LoadFilesAndFoldersAsync();
+                }
+                catch (Exception ex) { MessageBox.Show($"Silinirken hata: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error); }
             }
         }
-
-        private void checkBox1_CheckedChanged(object sender, EventArgs e)
-        {
-            comboBox1.Visible = checkBox1.Checked;
-        }
-
-        private async void comboBox1_SelectedIndexChanged(object sender, EventArgs e)
-        {
-            if (comboBox1.SelectedItem != null)
-            {
-                string selectedDrive = comboBox1.SelectedItem.ToString();
-                filepack = selectedDrive;
-                filetexbox.Text = filepack;
-                isfile = false;
-                await loadfile_async();
-            }
-        }
-
-        private async void toolStripButtonRefresh_Click(object sender, EventArgs e)
-        {
-            await loadfile_async();
-        }
-
-        private void toolStripButtonDelete_Click(object sender, EventArgs e)
-        {
-            DeleteSelectedItem();
-        }
-
-        private void openToolStripMenuItem_Click(object sender, EventArgs e)
-        {
-            listView1_DoubleClick(sender, e);
-        }
-
-        private void deleteToolStripMenuItem_Click(object sender, EventArgs e)
-        {
-            DeleteSelectedItem();
-        }
-
-        private void propertiesToolStripMenuItem_Click(object sender, EventArgs e)
-        {
-            if (listView1.SelectedItems.Count > 0)
-            {
-                string selectedName = listView1.SelectedItems[0].Text;
-                string fullPath = Path.Combine(filepack, selectedName);
-                MessageBox.Show($"{selectedName} özellikleri\nYol: {fullPath}", "Özellikler");
-            }
-        }
-
         private void copyPathToolStripMenuItem_Click(object sender, EventArgs e)
         {
             if (listView1.SelectedItems.Count > 0)
             {
-                string selectedName = listView1.SelectedItems[0].Text;
-                string fullPath = Path.Combine(filepack, selectedName);
-                Clipboard.SetText(fullPath);
-                MessageBox.Show("Yol panoya kopyalandı: " + fullPath, "Yol Kopyala");
+                Clipboard.SetText(Path.Combine(currentPath, listView1.SelectedItems[0].Text));
             }
         }
-
-        private void filetexbox_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Enter)
-            {
-                loadbuttonaction();
-            }
-        }
-
-        private void listView1_ItemSelectionChanged(object sender, ListViewItemSelectionChangedEventArgs e)
+        private void propertiesToolStripMenuItem_Click(object sender, EventArgs e)
         {
             if (listView1.SelectedItems.Count > 0)
+                MessageBox.Show($"Yol: {Path.Combine(currentPath, listView1.SelectedItems[0].Text)}", "Özellikler");
+        }
+        private async void comboBox1_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (comboBoxDrives.SelectedItem != null)
             {
-                string selectedName = listView1.SelectedItems[0].Text;
-                string fullPath = Path.Combine(filepack, selectedName);
-
-                dadilab.Text = selectedName;
-
-                if (Directory.Exists(fullPath))
-                {
-                    dturuetiket.Text = "Klasör";
-                }
-                else if (File.Exists(fullPath))
-                {
-                    dturuetiket.Text = Path.GetExtension(fullPath);
-                }
-                else
-                {
-                    dturuetiket.Text = "Bilinmiyor";
-                }
+                currentPath = comboBoxDrives.SelectedItem.ToString();
+                filetexbox.Text = currentPath;
+                await LoadFilesAndFoldersAsync();
             }
         }
-
-        private void listView1_MouseUp(object sender, MouseEventArgs e)
+        private async void Form1_KeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Button == MouseButtons.Right)
-            {
-                var focusedItem = listView1.FocusedItem;
-                if (focusedItem != null && focusedItem.Bounds.Contains(e.Location))
-                {
-                    contextMenuStrip1.Show(listView1, e.Location);
-                }
-            }
+            if (e.KeyCode == Keys.F5) await LoadFilesAndFoldersAsync();
+            if (e.KeyCode == Keys.Back) await GoBackAsync();
+            if (e.KeyCode == Keys.Delete) toolStripButtonDelete_Click(sender, e);
+            if (e.KeyCode == Keys.Enter && listView1.Focused) listView1_DoubleClick(sender, e);
+        }
+        private void txtSearch_TextChanged(object sender, EventArgs e)
+        {
+            string searchText = (txtSearch.Text == searchPlaceholder) ? "" : txtSearch.Text.ToLower();
+            listView1.BeginUpdate();
+            listView1.Items.Clear();
+            var filteredItems = string.IsNullOrWhiteSpace(searchText)
+                ? allItemsCache
+                : allItemsCache.Where(item => item.Text.ToLower().Contains(searchText));
+            listView1.Items.AddRange(filteredItems.ToArray());
+            listView1.EndUpdate();
+        }
+        private void listView1_ItemSelectionChanged(object sender, ListViewItemSelectionChangedEventArgs e) {  }
+
+        private void listView1_ColumnClick(object sender, ColumnClickEventArgs e)
+        {
+            listView1.ListViewItemSorter = new ListViewItemComparer(e.Column,
+                listView1.Sorting == SortOrder.Ascending ? SortOrder.Descending : SortOrder.Ascending);
+            listView1.Sort();
+        }
+        #endregion
+    }
+
+    #region Theme Interfaces and Classes
+    public interface ITheme
+    {
+        Color BackColor { get; }
+        Color ForeColor { get; }
+        Color TextBoxBackColor { get; }
+    }
+
+    public class LightTheme : ITheme
+    {
+        public static LightTheme Instance { get; } = new LightTheme();
+        public Color BackColor => Color.White;
+        public Color ForeColor => Color.Black;
+        public Color TextBoxBackColor => Color.White;
+    }
+
+    public class DarkTheme : ITheme
+    {
+        public static DarkTheme Instance { get; } = new DarkTheme();
+        public Color BackColor => Color.FromArgb(30, 30, 30);
+        public Color ForeColor => Color.White;
+        public Color TextBoxBackColor => Color.FromArgb(50, 50, 50);
+    }
+    #endregion
+
+    #region ListView Sorter
+    public class ListViewItemComparer : IComparer
+    {
+        private int col;
+        private SortOrder order;
+
+        public ListViewItemComparer(int column, SortOrder order)
+        {
+            col = column;
+            this.order = order;
         }
 
-        private class ListViewItemComparer : System.Collections.IComparer
+        public int Compare(object x, object y)
         {
-            private int col;
-            private SortOrder order;
+            ListViewItem itemX = x as ListViewItem;
+            ListViewItem itemY = y as ListViewItem;
 
-            public ListViewItemComparer(int column, SortOrder order)
-            {
-                col = column;
-                this.order = order;
-            }
+            if (itemX.Text == "..") return -1;
+            if (itemY.Text == "..") return 1;
 
-            public int Compare(object x, object y)
-            {
-                int returnVal = string.Compare(
-                    ((ListViewItem)x).SubItems[col].Text,
-                    ((ListViewItem)y).SubItems[col].Text);
+            bool isXFolder = itemX.SubItems[2].Text == "Klasör";
+            bool isYFolder = itemY.SubItems[2].Text == "Klasör";
 
-                if (order == SortOrder.Descending)
-                    returnVal *= -1;
+            if (isXFolder && !isYFolder) return -1;
+            if (!isXFolder && isYFolder) return 1;
 
-                return returnVal;
-            }
+            int returnVal = string.Compare(itemX.SubItems[col].Text, itemY.SubItems[col].Text);
+
+            if (order == SortOrder.Descending)
+                returnVal *= -1;
+
+            return returnVal;
         }
     }
+    #endregion
 }

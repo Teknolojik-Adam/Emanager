@@ -99,6 +99,7 @@
     <Content Include="Resources\3gp.png" />
     <Content Include="Resources\aacfile.png" />
     <Content Include="Resources\archive.png" />
+    <None Include="Resources\back.png" />
     <Content Include="Resources\dll.png" />
     <Content Include="Resources\doc.png" />
     <Content Include="Resources\exe.png" />
