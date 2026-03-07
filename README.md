@@ -177,17 +177,6 @@ public class DarkTheme : ITheme
 }
 ```
 
-## 🔄 Geliştirme Yol Haritası (Planlanan)
-
-- [ ] Sanal ScrollMode (10000+ dosya desteği)
-- [ ] Thumbnail önizlemesi (resim dosyaları)
-- [ ] Archive dosya desteği (.zip, .rar, .7z)
-- [ ] FTP/SFTP bağlantı desteği
-- [ ] Arama geçmişi
-- [ ] Drag & Drop desteği
-- [ ] Multi-select kopyala/taşı
-- [ ] Betik/Batch işlemleri
-- [ ] Dark mode otomatik geçişi (sistem saati)
 
 ## 📄 Lisans
 
@@ -197,5 +186,5 @@ Bu proje `LICENSE.txt` dosyasında belirtilen lisans koşulları altında dağı
 
 **Versiyon:** 2.0  
 **Son Güncelleme:** Mart 2026  
-**Geliştirici:** Admin Mehmet
+
 
