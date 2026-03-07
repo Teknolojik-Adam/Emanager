@@ -1,15 +1,15 @@
-# Emanager Dosya Gezgini v2.0
+# Emanager Dosya Gezgini v0.3
 
 `Emanager`, Windows işletim sistemleri için C# ve WinForms teknolojileri kullanılarak geliştirilmiş, temel dosya yönetimi işlevlerini yerine getiren basit, hafif ve güçlü bir dosya gezgini uygulamasıdır.
 
-## ✨ Yeni Özellikler (v2.0)
+## ✨ Yeni Özellikler (v0.3)
 
 ### 📋 Dosya İşlemleri
 - **Kopyala** (Ctrl+C) - Dosya ve klasörleri kopyala
 - **Taşı** (Ctrl+X) - Dosya ve klasörleri taşı
 - **Yapıştır** (Ctrl+V) - Kopyalanan/Taşınan öğeleri yapıştır
 - **Yeniden Adlandır** (F2) - Dosya ve klasörleri yeniden adlandır
-- Aynı adda dosya varsa otomatik (1), (2) vs. ekleme
+- Aynı adda dosya varsa otomatik ,  vs. ekleme
 
 ### 🔍 Gelişmiş Arama
 - **Wildcard desteği:** `*.txt`, `test*`, `?ile.doc` gibi pattern'ler
