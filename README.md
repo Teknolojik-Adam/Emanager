@@ -160,7 +160,7 @@ Bu proje `LICENSE.txt` dosyasında belirtilen lisans koşulları altında dağı
 
 ---
 
-**Versiyon:** 2.0  
+**Versiyon:** 0.3  
 **Son Güncelleme:** Mart 2026  
 
 
