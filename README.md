@@ -154,7 +154,7 @@ Hata günlükleri otomatik olarak kaydedilir. Sorun yaşarsanız:
 |-------|-------|------|
 | **NLog** | 3.1.0 | Loglama framework'ü |
 
-> **Not:** Diğer paketler (Castle.Core, TeamViewer vb.) şu anda kullanılmamaktadır ve sonraki sürümde kaldırılabilir.
+> **Not:** Diğer paketler (Castle.Core vb.) şu anda kullanılmamaktadır ve sonraki sürümde kaldırılabilir.
 
 ## 🎨 Tema Özelleştirme
 
