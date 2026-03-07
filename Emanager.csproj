@@ -51,9 +51,6 @@
     <Reference Include="System.Net.Http" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Xml" />
-    <Reference Include="TeamViewer.QuickSupport.Integration, Version=1805.24.1.0, Culture=neutral, PublicKeyToken=ffbbfc56bb3fb7ff, processorArchitecture=MSIL">
-      <HintPath>packages\TeamViewer.QuickSupport.Integration.1805.24.1\lib\net45\TeamViewer.QuickSupport.Integration.dll</HintPath>
-    </Reference>
     <Reference Include="TestStack.White, Version=0.13.0.0, Culture=neutral, PublicKeyToken=2672efbf3e161801, processorArchitecture=MSIL">
       <HintPath>packages\TestStack.White.0.13.3\lib\net40\TestStack.White.dll</HintPath>
     </Reference>
