@@ -75,7 +75,6 @@
             this.listView1.TabIndex = 1;
             this.listView1.UseCompatibleStateImageBehavior = false;
             this.listView1.View = System.Windows.Forms.View.Details;
-            this.listView1.VirtualMode = false; // Büyük klasörler için true yap
             this.listView1.ColumnClick += new System.Windows.Forms.ColumnClickEventHandler(this.listView1_ColumnClick);
             this.listView1.ItemSelectionChanged += new System.Windows.Forms.ListViewItemSelectionChangedEventHandler(this.listView1_ItemSelectionChanged);
             this.listView1.DoubleClick += new System.EventHandler(this.listView1_DoubleClick);
@@ -319,8 +318,7 @@
             this.Controls.Add(this.toolStrip1);
             this.Controls.Add(this.statusStrip1);
             this.Name = "Form1";
-            this.Text = "📁 E-Manager v2.0";
-            this.Icon = System.Drawing.SystemIcons.Application;
+            this.Text = "E-Manager";
             this.Load += new System.EventHandler(this.Form1_Load);
             this.contextMenuStrip1.ResumeLayout(false);
             this.statusStrip1.ResumeLayout(false);
