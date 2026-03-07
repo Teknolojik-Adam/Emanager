@@ -155,29 +155,6 @@ Hata günlükleri otomatik olarak kaydedilir. Sorun yaşarsanız:
 | **NLog** | 3.1.0 | Loglama framework'ü |
 
 
-## 🎨 Tema Özelleştirme
-
-Tema renklerini `Form1.cs` dosyasında değiştirebilirsiniz:
-
-```csharp
-public class LightTheme : ITheme
-{
-    public Color BackColor => Color.FromArgb(245, 245, 245);
-    public Color ForeColor => Color.FromArgb(33, 33, 33);
-    public Color TextBoxBackColor => Color.White;
-    public Color AccentColor => Color.FromArgb(0, 120, 215);
-}
-
-public class DarkTheme : ITheme
-{
-    public Color BackColor => Color.FromArgb(30, 30, 30);
-    public Color ForeColor => Color.FromArgb(240, 240, 240);
-    public Color TextBoxBackColor => Color.FromArgb(50, 50, 50);
-    public Color AccentColor => Color.FromArgb(100, 180, 255);
-}
-```
-
-
 ## 📄 Lisans
 
 Bu proje `LICENSE.txt` dosyasında belirtilen lisans koşulları altında dağıtılmaktadır.
