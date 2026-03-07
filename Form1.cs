@@ -393,10 +393,7 @@ namespace teny_desk
 
         #region Performance Optimization
         
-        /// <summary>
-        /// Dosya boyutunu insan tarafından okunabilir formata çevirir
-        /// </summary>
-        private string FormatFileSize(long bytes)
+                private string FormatFileSize(long bytes)
         {
             if (bytes == 0) return "0 B";
             string[] sizes = { "B", "KB", "MB", "GB", "TB" };
@@ -413,7 +410,7 @@ namespace teny_desk
         }
         
         /// <summary>
-        /// Dosya türü adını oluşturur
+        /// Dosya türü ve adını oluşturur
         /// </summary>
         private string GetFileTypeName(string extension)
         {
@@ -1003,7 +1000,7 @@ namespace teny_desk
             
             foreach (var item in allItemsCache)
             {
-                // ".." öğesini her zaman göster
+            
                 if (item.Text == "..")
                 {
                     filteredItems.Add(item);
@@ -1083,7 +1080,7 @@ namespace teny_desk
 
             if (itemX == null || itemY == null) return 0;
 
-            // ".." her zaman başta
+         
             if (itemX.Text == "..") return -1;
             if (itemY.Text == "..") return 1;
 
@@ -1096,7 +1093,7 @@ namespace teny_desk
 
             int returnVal = 0;
 
-            // Boyut sütununu özel olarak sort et
+            
             if (col == 1 && itemX.SubItems.Count > col && itemY.SubItems.Count > col)
             {
                 string xSize = itemX.SubItems[col].Text.Split()[0];
