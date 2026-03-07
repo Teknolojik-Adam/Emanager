@@ -146,7 +146,6 @@ DarkMode=True/False
 
 Hata günlükleri otomatik olarak kaydedilir. Sorun yaşarsanız:
 1. `%APPDATA%\Emanager\logs\` klasöründeki log dosyalarını kontrol edin
-2. Günlüklerde veri göreceğiniz hata kodlarını yanlış işaretleyin
 
 ## 📦 Bağımlılıklar
 
