@@ -28,8 +28,21 @@ public static class NetworkLocations
         return true;
     }
 
-    public static string MountRoot =>
-        Path.Combine(Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR") ?? "/run/user/0", "gvfs");
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
+
+    public static string MountRoot
+    {
+        get
+        {
+            var runtime = Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR");
+            if (!string.IsNullOrEmpty(runtime) && Path.IsPathFullyQualified(runtime))
+                return Path.Combine(runtime, "gvfs");
+            return OperatingSystem.IsLinux()
+                ? $"/run/user/{GetEffectiveUserId()}/gvfs"
+                : Path.Combine(Path.GetTempPath(), "emanager-gvfs-unavailable");
+        }
+    }
 
     public static IReadOnlyList<(string Label, string Path)> Mounted()
     {
@@ -102,11 +115,12 @@ public static class NetworkLocations
             throw new ArgumentException("Geçerli bir SMB/SFTP bağlantısı seçin.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
-        using var process = new Process { StartInfo = new ProcessStartInfo("gio")
+        using var process = new Process { StartInfo = new ProcessStartInfo("/usr/bin/gio")
         {
             UseShellExecute = false, RedirectStandardError = true,
             RedirectStandardOutput = true, CreateNoWindow = true
         } };
+        TrustedTools.SecurePath(process.StartInfo);
         process.StartInfo.ArgumentList.Add("mount");
         process.StartInfo.ArgumentList.Add("-u");
         process.StartInfo.ArgumentList.Add(mountPath);
@@ -141,13 +155,14 @@ public static class NetworkLocations
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(40));
         using var process = new Process();
-        process.StartInfo = new ProcessStartInfo("gio")
+        process.StartInfo = new ProcessStartInfo("/usr/bin/gio")
         {
             UseShellExecute = false,
             RedirectStandardError = true,
             RedirectStandardOutput = true,
             CreateNoWindow = true
         };
+        TrustedTools.SecurePath(process.StartInfo);
         process.StartInfo.ArgumentList.Add("mount");
         process.StartInfo.ArgumentList.Add(normalized);
         if (!process.Start()) throw new IOException(UiText.T("gio başlatılamadı."));

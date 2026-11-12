@@ -291,6 +291,23 @@ try
     Check(infoText.Contains("[Trash Info]", StringComparison.Ordinal) && infoText.Contains("Path=", StringComparison.Ordinal)
         && infoText.Contains("DeletionDate=", StringComparison.Ordinal), "trashinfo follows freedesktop spec");
 
+    // The default home-trash decision must work on Fedora's glibc. This is
+    // intentionally tested without touching the real trash: it verifies the
+    // filesystem identity primitive used before the destination is selected.
+    if (OperatingSystem.IsLinux())
+    {
+        var sameDevice = typeof(SafeFileOperations).GetMethod("SameDevice",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var homeProbe = Path.Combine(UserFolders.Home, ".emanager-trash-probe-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(homeProbe);
+        try
+        {
+            Check((bool)sameDevice.Invoke(null, [homeProbe, UserFolders.Home])!,
+                "home and isolated source resolve to the same filesystem");
+        }
+        finally { Directory.Delete(homeProbe); }
+    }
+
     // A second trashed file with the same name must not evict the first one.
     await File.WriteAllTextAsync(trashFile, "T2");
     SafeFileOperations.Trash(trashFile, trashRoot);
@@ -303,13 +320,31 @@ try
     SafeFileOperations.Trash(trashDir, trashRoot);
     Check(!Directory.Exists(trashDir) && File.Exists(Path.Combine(trashRoot, "files", "trashdir", "inside.txt")),
         "directory trash keeps contents");
+    var restoredTrashDir = TrashService.List(trashRoot).Single(x => x.Name == "trashdir");
+    TrashService.Restore(restoredTrashDir);
+    Check(Directory.Exists(trashDir) && File.ReadAllText(Path.Combine(trashDir, "inside.txt")) == "I",
+        "non-empty directory trash restores contents");
+    Directory.Delete(trashDir, recursive: true);
+    var emptyTrashDir = Path.Combine(root, "empty-trash-dir");
+    Directory.CreateDirectory(emptyTrashDir);
+    SafeFileOperations.Trash(emptyTrashDir, trashRoot);
+    var restoredEmptyDir = TrashService.List(trashRoot).Single(x => x.Name == "empty-trash-dir");
+    TrashService.Restore(restoredEmptyDir);
+    Check(Directory.Exists(emptyTrashDir) && !Directory.EnumerateFileSystemEntries(emptyTrashDir).Any(),
+        "empty directory trash restores as a directory");
+    Directory.Delete(emptyTrashDir);
     if (!OperatingSystem.IsWindows())
     {
         var linkToTrash = Path.Combine(root, "link-to-trash");
         File.CreateSymbolicLink(linkToTrash, Path.Combine(root, "nonexistent"));
         SafeFileOperations.Trash(linkToTrash, trashRoot);
-        Check(!File.Exists(linkToTrash) && !Directory.EnumerateFileSystemEntries(Path.Combine(trashRoot, "files")).Contains("link-to-trash"),
-            "symlink trash unlinks without moving");
+        var trashedLink = Path.Combine(trashRoot, "files", "link-to-trash");
+        Check(!File.Exists(linkToTrash) && new FileInfo(trashedLink).LinkTarget == Path.Combine(root, "nonexistent"),
+            "symlink trash moves the link without deleting it");
+        var trashedLinkEntry = TrashService.List(trashRoot).Single(x => x.Name == "link-to-trash");
+        TrashService.Restore(trashedLinkEntry);
+        Check(new FileInfo(linkToTrash).LinkTarget == Path.Combine(root, "nonexistent"),
+            "trashed symlink can be restored");
 
         // Moving and renaming must relocate the link itself, never its target.
         await File.WriteAllTextAsync(Path.Combine(root, "outside-target"), "OUT");
@@ -330,6 +365,211 @@ try
         Check(new DirectoryInfo(Path.Combine(moveTarget, "dangling-renamed")).LinkTarget == Path.Combine(root, "no-such-target"),
             "dangling link rename preserves target");
     }
+
+    // ---- Trash service: isolated freedesktop metadata and lifecycle ----
+    var managedTrash = Path.Combine(root, "managed-trash");
+    var restoreDir = Path.Combine(root, "restore-destination");
+    Directory.CreateDirectory(restoreDir);
+    var trashSource = Path.Combine(restoreDir, "özel # dosya.txt");
+    await File.WriteAllTextAsync(trashSource, "restore me");
+    SafeFileOperations.Trash(trashSource, managedTrash);
+    var trashEntries = TrashService.List(managedTrash);
+    Check(trashEntries.Count == 1 && trashEntries[0].Name == "özel # dosya.txt", "trash lists metadata entry");
+    Check(trashEntries[0].OriginalPath == trashSource && trashEntries[0].Size == 10, "trash metadata keeps original path and size");
+    TrashService.Restore(trashEntries[0]);
+    Check(File.Exists(trashSource) && await File.ReadAllTextAsync(trashSource) == "restore me", "trash entry restores to original path");
+
+    var conflictSource = Path.Combine(restoreDir, "conflict.txt");
+    await File.WriteAllTextAsync(conflictSource, "original");
+    SafeFileOperations.Trash(conflictSource, managedTrash);
+    await File.WriteAllTextAsync(conflictSource, "new file");
+    var conflictEntry = TrashService.List(managedTrash).Single(x => x.Name == "conflict.txt");
+    await ThrowsAsync<IOException>(() => Task.Run(() => TrashService.Restore(conflictEntry)), "restore collision is refused");
+    Check(await File.ReadAllTextAsync(conflictSource) == "new file", "restore collision does not overwrite target");
+    TrashService.PermanentlyDelete(conflictEntry);
+    Check(!TrashService.List(managedTrash).Any(x => x.Name == "conflict.txt"), "permanent delete removes selected entry");
+
+    var emptyA = Path.Combine(restoreDir, "empty-a");
+    var emptyB = Path.Combine(restoreDir, "empty-b");
+    await File.WriteAllTextAsync(emptyA, "a");
+    await File.WriteAllTextAsync(emptyB, "b");
+    SafeFileOperations.Trash(emptyA, managedTrash);
+    SafeFileOperations.Trash(emptyB, managedTrash);
+    Check(TrashService.Empty(managedTrash) == 2, "empty trash removes all entries");
+    Check(TrashService.List(managedTrash).Count == 0, "empty trash reports empty state");
+
+    var unavailableTrash = Path.Combine(root, "not-a-directory");
+    await File.WriteAllTextAsync(unavailableTrash, "not a directory");
+    var protectedSource = Path.Combine(restoreDir, "protected.txt");
+    await File.WriteAllTextAsync(protectedSource, "must survive");
+    await ThrowsAsync<IOException>(() => Task.Run(() => SafeFileOperations.Trash(protectedSource, unavailableTrash)),
+        "unavailable trash refuses instead of deleting");
+    Check(File.Exists(protectedSource), "unavailable trash preserves source");
+
+    // Internal drag tickets must be one-use and may never carry external file lists.
+    Check(!InternalDragRegistry.IsPending("external-fake-ticket"), "external drag token rejected");
+    Check(InternalDragRegistry.Consume("external-fake-ticket") is null, "external drag cannot supply paths");
+    var dragSource = Path.Combine(root, "drag-source.txt");
+    await File.WriteAllTextAsync(dragSource, "fixture");
+    var ticket = InternalDragRegistry.Begin([dragSource]);
+    Check(InternalDragRegistry.IsPending(ticket), "internal drag token exists");
+    Check(InternalDragRegistry.Consume(ticket) is { Count: 1 } paths && paths[0] == dragSource,
+        "internal drag receives original registered path");
+    Check(!InternalDragRegistry.IsPending(ticket) && InternalDragRegistry.Consume(ticket) is null,
+        "replayed internal drag refused");
+    var revoked = InternalDragRegistry.Begin([dragSource]);
+    InternalDragRegistry.Revoke(revoked);
+    Check(InternalDragRegistry.Consume(revoked) is null, "cancelled drag token revoked");
+    await ThrowsAsync<ArgumentException>(() => Task.Run(() => InternalDragRegistry.Begin(["relative-file.txt"])),
+        "relative drag paths rejected");
+
+    var launcher = Path.Combine(root, "sample.desktop");
+    await File.WriteAllTextAsync(launcher, "[Desktop Entry]\nExec=echo fixture\n");
+    Check(UntrustedLauncher.IsPotentiallyExecutable(launcher), "desktop launcher requires warning");
+    Check(UntrustedLauncher.Describe(launcher).Contains("echo fixture", StringComparison.Ordinal),
+        "desktop warning shows launcher command");
+    Check(!UntrustedLauncher.IsPotentiallyExecutable(dragSource), "plain text is not an executable");
+    Check(TrustedTools.Resolve("tar") is { } tarPath && Path.IsPathFullyQualified(tarPath) &&
+        tarPath.StartsWith("/usr/bin/", StringComparison.Ordinal), "tools resolved from system directory");
+    Check(TrustedTools.Resolve("../tar") is null && TrustedTools.Resolve("/tmp/tar") is null,
+        "tool resolver refuses path injection");
+
+    if (OperatingSystem.IsLinux())
+    {
+        var linkAlias = Path.Combine(root, "disguised-document.txt");
+        File.CreateSymbolicLink(linkAlias, launcher);
+        Check(UntrustedLauncher.IsPotentiallyExecutable(linkAlias), "launcher symlink cannot hide executable type");
+        Check(UntrustedLauncher.Describe(linkAlias).Contains("echo fixture", StringComparison.Ordinal),
+            "launcher symlink warning includes command");
+        var noReplaceSource = Path.Combine(root, "race-source-link");
+        var noReplaceTarget = Path.Combine(root, "race-target-existing");
+        File.CreateSymbolicLink(noReplaceSource, dragSource);
+        await File.WriteAllTextAsync(noReplaceTarget, "KEEP");
+        // The native RENAME_NOREPLACE path must not evict a competing entry.
+        var method = typeof(SafeFileOperations).GetMethod("RenameNoReplaceNative",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var result = (int)method.Invoke(null, [-100, noReplaceSource, -100, noReplaceTarget, 1u])!;
+        Check(result == -1 && File.ReadAllText(noReplaceTarget) == "KEEP",
+            "Linux renameat2 rejects overwrite atomically");
+        Check(new FileInfo(noReplaceSource).LinkTarget == dragSource,
+            "failed atomic rename preserves source symlink");
+    }
+    // Build archives through the same implementation the UI calls.
+    if (TrustedTools.Resolve("7z") is not null && TrustedTools.Resolve("tar") is not null)
+    {
+        var archiveDir = Path.Combine(root, "archive-fixtures");
+        Directory.CreateDirectory(archiveDir);
+        var archiveInput = Path.Combine(archiveDir, "sample.txt");
+        await File.WriteAllTextAsync(archiveInput, "archive bytes");
+        var firstZip = await SafeArchiveOperations.CreateAsync([archiveInput], archiveDir, "zip");
+        Check(File.Exists(firstZip) && new FileInfo(firstZip).Length > 0, "ZIP archive published after complete build");
+        var firstHash = System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(firstZip));
+        var secondZip = await SafeArchiveOperations.CreateAsync([archiveInput], archiveDir, "zip");
+        Check(firstZip != secondZip && File.Exists(secondZip), "second archive gets collision-free filename");
+        Check(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(firstZip)).SequenceEqual(firstHash),
+            "second archive never overwrites first");
+        var tarball = await SafeArchiveOperations.CreateAsync([archiveInput], archiveDir, "tar.gz");
+        Check(File.Exists(tarball) && new FileInfo(tarball).Length > 0, "tar.gz archive published after complete build");
+        Check(!Directory.EnumerateDirectories(archiveDir, ".emanager-archive-*").Any(),
+            "archive staging directories cleaned after success");
+        await ThrowsAsync<ArgumentException>(() => SafeArchiveOperations.CreateAsync([archiveInput], archiveDir, "invalid"),
+            "unknown archive format rejected");
+        await ThrowsAsync<ArgumentException>(() => SafeArchiveOperations.CreateAsync([dragSource], archiveDir, "zip"),
+            "source outside selected directory rejected");
+        Check(!Directory.EnumerateDirectories(archiveDir, ".emanager-archive-*").Any(),
+            "invalid archive requests leave no temporary directories");
+    }
+
+    var existingPath = Environment.GetEnvironmentVariable("PATH");
+    try
+    {
+        Environment.SetEnvironmentVariable("PATH", ".:/tmp:/usr/bin");
+        var trustedStart = new System.Diagnostics.ProcessStartInfo("/usr/bin/echo");
+        TrustedTools.SecurePath(trustedStart);
+        Check(!trustedStart.Environment["PATH"]!.Split(Path.PathSeparator).Contains(".") &&
+            !trustedStart.Environment["PATH"]!.Split(Path.PathSeparator).Contains("/tmp"),
+            "child environment excludes relative and shared-writable PATH components");
+    }
+    finally { Environment.SetEnvironmentVariable("PATH", existingPath); }
+    // Open With: real desktop-entry parsing, MIME identification, safe app launching
+    // and isolated default app settings (never mutate the user's real associations).
+    var xdgRoot = Path.Combine(root, "xdg-openwith-test");
+    var xdgApps = Path.Combine(xdgRoot, "applications");
+    Directory.CreateDirectory(xdgApps);
+    var uniqueMime = "application/x-emanager-openwith-" + Guid.NewGuid().ToString("N");
+    var exampleDesktop = Path.Combine(xdgApps, "org.example.SafeViewer.desktop");
+    await File.WriteAllTextAsync(exampleDesktop,
+        "[Desktop Entry]\nType=Application\nName=Example Viewer\n" +
+        "Exec=/usr/bin/true %f\nMimeType=" + uniqueMime + ";text/plain;\nComment=Fixture viewer\n");
+    var hiddenDesktop = Path.Combine(xdgApps, "hidden.desktop");
+    await File.WriteAllTextAsync(hiddenDesktop, "[Desktop Entry]\nType=Application\nName=Hidden\n" +
+        "Hidden=true\nExec=/usr/bin/true %f\n");
+    var disabledDesktop = Path.Combine(xdgApps, "not-installed.desktop");
+    await File.WriteAllTextAsync(disabledDesktop, "[Desktop Entry]\nType=Application\nName=Unavailable\n" +
+        "TryExec=/path/not-installed-app\nExec=/usr/bin/true %f\n");
+    var submenuDir = Path.Combine(xdgApps, "subfolder");
+    Directory.CreateDirectory(submenuDir);
+    await File.WriteAllTextAsync(Path.Combine(submenuDir, "another.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Another Viewer\nExec=/usr/bin/true %f\n");
+    var discovered = OpenWithService.DiscoverApplications([xdgRoot]);
+    Check(discovered.Count == 2, "application picker ignores hidden or missing programs");
+    var viewer = discovered.Single(x => x.DesktopId == "org.example.SafeViewer.desktop");
+    Check(viewer.Name == "Example Viewer" && viewer.Supports(uniqueMime),
+        "desktop application name and MIME association are parsed");
+    Check(discovered.Any(x => x.DesktopId == "subfolder-another.desktop"),
+        "nested desktop file identifier follows freedesktop specification");
+    Check(OpenWithService.ValidMimeType("text/plain") &&
+        !OpenWithService.ValidMimeType("text/plain\nother") &&
+        !OpenWithService.ValidMimeType("../invalid"), "MIME identifiers are validated");
+    Check(!OpenWithService.ValidDesktopId("../evil.desktop") &&
+        OpenWithService.ValidDesktopId(viewer.DesktopId), "desktop application IDs reject path traversal");
+    var launchInfo = OpenWithService.BuildLaunchInfo(viewer, dragSource);
+    Check(launchInfo.FileName == "/usr/bin/gio" &&
+        launchInfo.ArgumentList.Count == 3 && launchInfo.ArgumentList[0] == "launch" &&
+        launchInfo.ArgumentList[1] == exampleDesktop && launchInfo.ArgumentList[2] == dragSource,
+        "application launching uses gio launch and structured arguments");
+    Check(await OpenWithService.GetMimeTypeAsync(dragSource) == "text/plain",
+        "xdg-mime identifies text file MIME without relying on extension");
+    await OpenWithService.LaunchAsync(viewer, dragSource);
+    Check(true, "gio launch can open the selected installed test application");
+
+    var installed = await OpenWithService.LoadChoicesAsync(dragSource);
+    Check(installed.MimeType == "text/plain" && installed.Applications.Count > 0,
+        "actual Fedora applications are discoverable for a real MIME type");
+    Check(installed.Applications.Any(app => app.Supports(installed.MimeType) ||
+        installed.RecommendedIds.Contains(app.DesktopId) || app.DesktopId == installed.DefaultId),
+        "real MIME file type provides suggested applications");
+
+    var originalConfig = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
+    var originalData = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+    var originalDataDirs = Environment.GetEnvironmentVariable("XDG_DATA_DIRS");
+    var originalDesktop = Environment.GetEnvironmentVariable("XDG_CURRENT_DESKTOP");
+    var isolatedConfig = Path.Combine(root, "xdg-openwith-config");
+    Directory.CreateDirectory(isolatedConfig);
+    try
+    {
+        Environment.SetEnvironmentVariable("XDG_CONFIG_HOME", isolatedConfig);
+        Environment.SetEnvironmentVariable("XDG_DATA_HOME", xdgRoot);
+        Environment.SetEnvironmentVariable("XDG_DATA_DIRS", xdgRoot);
+        Environment.SetEnvironmentVariable("XDG_CURRENT_DESKTOP", "");
+        await OpenWithService.SetDefaultAsync(uniqueMime, viewer);
+        Check(await OpenWithService.GetDefaultAsync(uniqueMime) == viewer.DesktopId,
+            "selected program is persisted as MIME default");
+        Check(File.Exists(Path.Combine(isolatedConfig, "mimeapps.list")),
+            "MIME association is saved only in isolated test configuration");
+        var anyProgram = discovered.Single(x => x.DesktopId == "subfolder-another.desktop");
+        await OpenWithService.SetDefaultAsync(uniqueMime, anyProgram);
+        Check(await OpenWithService.GetDefaultAsync(uniqueMime) == anyProgram.DesktopId,
+            "programs without declared MIME support can also become defaults");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("XDG_CONFIG_HOME", originalConfig);
+        Environment.SetEnvironmentVariable("XDG_DATA_HOME", originalData);
+        Environment.SetEnvironmentVariable("XDG_DATA_DIRS", originalDataDirs);
+        Environment.SetEnvironmentVariable("XDG_CURRENT_DESKTOP", originalDesktop);
+    }
+
     Console.WriteLine($"PASS: {passed} assertions");
 }
 finally

@@ -73,7 +73,8 @@ public static class FileSystem
         catch (UnauthorizedAccessException) { return null; }
     }
 
-    public static Task<IReadOnlyList<FileEntry>> ListAsync(string path, CancellationToken ct) => Task.Run(() =>
+    public static Task<IReadOnlyList<FileEntry>> ListAsync(string path, CancellationToken ct) =>
+        KioAdmin.Enabled ? KioAdmin.ListAsync(path, ct) : Task.Run(() =>
     {
         var results = new List<FileEntry>();
         foreach (string item in Directory.EnumerateFileSystemEntries(path))

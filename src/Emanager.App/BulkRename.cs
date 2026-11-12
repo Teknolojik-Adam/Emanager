@@ -102,7 +102,7 @@ public static class BulkRename
         prefix.TextChanged += (_, _) => Update(); suffix.TextChanged += (_, _) => Update();
         number.IsCheckedChanged += (_, _) => Update(); preserve.IsCheckedChanged += (_, _) => Update();
         cancel.Click += (_, _) => dialog.Close(false);
-        apply.Click += (_, _) =>
+        apply.Click += async (_, _) =>
         {
             Update();
             if (!valid) return;
@@ -111,7 +111,18 @@ public static class BulkRename
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 status.Text = "Operation failed: " + ex.Message;
-                apply.IsEnabled = true;
+                if (ex.Message.Contains("Kurtarma raporu:", StringComparison.Ordinal))
+                {
+                    // Make any hidden .emanager-rename-* leftovers visible.
+                    if (owner is MainWindow main)
+                    {
+                        main.Prefs.ShowHidden = true;
+                        main.ApplyViewPrefsToAllPanes();
+                    }
+                    apply.IsEnabled = false;
+                    await MessageDialog.ShowAsync(dialog, "Toplu adlandırma: kurtarma gerekli", ex.Message);
+                }
+                else apply.IsEnabled = true;
             }
         };
         Update();
@@ -142,14 +153,61 @@ public static class BulkRename
                 completed.Add(item);
             }
         }
-        catch
+        catch (Exception original)
         {
-            // Reverse the second phase first, then restore every original name.
+            var rollbackErrors = new List<string>();
+            // Reverse the published targets before restoring original names.
             foreach (var item in completed.AsEnumerable().Reverse())
-                try { Move(item.Change.Target, item.Temporary, item.Change.Directory); } catch (IOException) { }
+            {
+                try { Move(item.Change.Target, item.Temporary, item.Change.Directory); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                { rollbackErrors.Add($"{item.Change.Target} → {item.Temporary}: {ex.Message}"); }
+            }
             foreach (var item in staged.AsEnumerable().Reverse())
-                try { Move(item.Temporary, item.Change.Source, item.Change.Directory); } catch (IOException) { }
-            throw;
+            {
+                try { Move(item.Temporary, item.Change.Source, item.Change.Directory); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                { rollbackErrors.Add($"{item.Temporary} → {item.Change.Source}: {ex.Message}"); }
+            }
+            if (rollbackErrors.Count == 0) throw;
+            var recoveryReport = SaveRecoveryReport(staged, rollbackErrors);
+            throw new IOException("Toplu adlandırma geri alınamadı! Dosyalar gizli geçici adlarda kalmış olabilir. " +
+                "Kurtarma raporu: " + recoveryReport + "\n" +
+                string.Join("\n", rollbackErrors.Take(8)), original);
+        }
+    }
+
+    private static string SaveRecoveryReport(
+        List<(Change Change, string Temporary)> staged, IReadOnlyList<string> failures)
+    {
+        var report = new System.Text.StringBuilder("Emanager toplu yeniden adlandırma kurtarma raporu\n");
+        report.AppendLine($"Zaman: {DateTime.UtcNow:O}");
+        foreach (var (change, temp) in staged)
+        {
+            report.AppendLine("Orijinal: " + change.Source);
+            report.AppendLine("Geçici: " + temp);
+            report.AppendLine("Hedef: " + change.Target);
+            report.AppendLine();
+        }
+        report.AppendLine("Geri alma hataları:");
+        foreach (var item in failures) report.AppendLine(item);
+        try
+        {
+            var folder = Path.Combine(UserFolders.ConfigDirectory, "rename-recovery");
+            if (OperatingSystem.IsLinux())
+                Directory.CreateDirectory(folder, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            else Directory.CreateDirectory(folder);
+            var path = Path.Combine(folder, "rename-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss") +
+                "-" + Guid.NewGuid().ToString("N") + ".txt");
+            using var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            using var writer = new StreamWriter(file);
+            writer.Write(report.ToString());
+            return path;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // A failed manifest must not hide the remaining temporary filenames.
+            return "RAPOR YAZILAMADI: " + ex.Message + "\n" + report;
         }
     }
 }

@@ -18,6 +18,12 @@ namespace Emanager.App;
 
 public enum ClipboardMode { Copy, Cut }
 
+public sealed record NavigationResult(bool Succeeded, string? ErrorMessage = null)
+{
+    public static NavigationResult Success() => new(true);
+    public static NavigationResult Failure(string message) => new(false, message);
+}
+
 /// <summary>
 /// One browsable location view. Each tab owns a left pane and, in dual-pane
 /// mode, a right pane. Navigation state (history, entries, filter) is per pane;
@@ -47,7 +53,16 @@ public sealed class FilePane : UserControl
     private const int MaxThumbnailCache = 160;
     private Point? dragStart;
     private bool dragInProgress;
-    private const string InternalPathsFormat = "application/x-emanager-paths";
+    private const string InternalPathsFormat = "application/x-emanager-internal-ticket";
+    private readonly TextBlock rootWarning = new()
+    {
+        Text = "⚠ KIO-ADMIN — TÜM PANELLERDE YÖNETİCİ YETKİSİ AKTİF",
+        Foreground = Brushes.OrangeRed, FontSize = 12, FontWeight = FontWeight.Bold,
+        IsVisible = false
+    };
+
+    public void RefreshAdminIndicator() => rootWarning.IsVisible = KioAdmin.Enabled;
+
 
     private ControlTheme? wrapGridTheme;
     private IReadOnlyList<FileEntry> entries = [];
@@ -101,6 +116,8 @@ public sealed class FilePane : UserControl
             Child = pathHint
         });
         heading.Children.Add(title);
+        heading.Children.Add(rootWarning);
+        RefreshAdminIndicator();
         heading.Children.Add(new ScrollViewer
         {
             Content = crumbs,
@@ -217,7 +234,17 @@ public sealed class FilePane : UserControl
             if (e.Key == Key.Enter) { OpenSelection(); e.Handled = true; }
         };
         list.SelectionChanged += (_, _) => { RaiseStatus(); UpdatePreview(); };
-        list.ContextRequested += (_, _) => { };
+        // Right-click the item under the pointer, not a previously selected file.
+        // Preserve multi-selection when clicking an already selected item.
+        list.AddHandler(PointerPressedEvent, (_, e) =>
+        {
+            if (!e.GetCurrentPoint(list).Properties.IsRightButtonPressed) return;
+            var row = (e.Source as Control)?.GetSelfAndVisualAncestors()
+                .OfType<ListBoxItem>().FirstOrDefault();
+            if (row?.DataContext is FileEntry entry &&
+                !(list.SelectedItems?.Contains(entry) ?? false))
+                list.SelectedItem = entry;
+        }, RoutingStrategies.Tunnel, handledEventsToo: true);
         list.ContextMenu = MakeContextMenu();
         DragDrop.SetAllowDrop(list, true);
         list.AddHandler(DragDrop.DragOverEvent, OnDragOver);
@@ -291,19 +318,19 @@ public sealed class FilePane : UserControl
         var paths = SelectedPaths();
         if (paths.Count == 0) return;
         dragInProgress = true;
+        string ticket = InternalDragRegistry.Begin(paths);
         try
         {
             var data = new DataObject();
-            data.Set(InternalPathsFormat, paths.ToArray());
+            data.Set(InternalPathsFormat, ticket);
             await DragDrop.DoDragDrop(e, data, DragDropEffects.Copy | DragDropEffects.Move);
         }
-        finally { dragInProgress = false; }
+        finally { InternalDragRegistry.Revoke(ticket); dragInProgress = false; }
     }
 
     private void OnDragOver(object? sender, DragEventArgs e)
     {
-        var paths = e.Data.Get(InternalPathsFormat) as string[];
-        if (paths is null || paths.Length == 0 || string.IsNullOrEmpty(Path))
+        if (!InternalDragRegistry.IsPending(e.Data.Get(InternalPathsFormat)) || string.IsNullOrEmpty(Path))
         { e.DragEffects = DragDropEffects.None; return; }
         e.DragEffects = e.KeyModifiers.HasFlag(KeyModifiers.Control) ? DragDropEffects.Copy : DragDropEffects.Move;
         e.Handled = true;
@@ -311,14 +338,20 @@ public sealed class FilePane : UserControl
 
     private async void OnDrop(object? sender, DragEventArgs e)
     {
-        var paths = e.Data.Get(InternalPathsFormat) as string[];
-        if (paths is null || paths.Length == 0) return;
+        var paths = InternalDragRegistry.Consume(e.Data.Get(InternalPathsFormat));
+        if (paths is null || paths.Count == 0) { e.DragEffects = DragDropEffects.None; return; }
         e.Handled = true;
         var copy = e.KeyModifiers.HasFlag(KeyModifiers.Control);
         var destination = Path;
         var target = (e.Source as Control)?.GetSelfAndVisualAncestors().OfType<ListBoxItem>().FirstOrDefault()?.DataContext as FileEntry;
         if (target is { IsDirectory: true, IsLink: false }) destination = target.FullPath;
-        if (!Directory.Exists(destination)) return;
+        var admin = KioAdmin.Enabled;
+        if (!admin && !Directory.Exists(destination)) return;
+        if (admin)
+        {
+            if (!await ConfirmRootMutationAsync(copy ? "Sürükleyerek kopyala" : "Sürükleyerek taşı", paths, destination)) return;
+            if (!KioAdmin.Enabled) return;
+        }
         var undo = new List<FileUndo.Step>();
         var errors = new List<string>();
         foreach (var source in paths)
@@ -326,15 +359,20 @@ public sealed class FilePane : UserControl
             try
             {
                 if (string.Equals(System.IO.Path.GetDirectoryName(source), destination, StringComparison.Ordinal)) continue;
-                if (copy) await SafeFileOperations.CopyAsync(source, destination);
+                if (admin)
+                {
+                    if (copy) await KioAdmin.CopyAsync(source, destination);
+                    else await KioAdmin.MoveAsync(source, destination);
+                }
+                else if (copy) await SafeFileOperations.CopyAsync(source, destination);
                 else await SafeFileOperations.MoveAsync(source, destination);
                 undo.Add(new FileUndo.Step(copy ? FileUndo.Kind.Copy : FileUndo.Kind.Move,
                     source, System.IO.Path.Combine(destination, System.IO.Path.GetFileName(source))));
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or TimeoutException or OperationCanceledException)
             { errors.Add(System.IO.Path.GetFileName(source) + ": " + ex.Message); }
         }
-        win.UndoHistory.Record(undo);
+        if (!admin) win.UndoHistory.Record(undo);
         await RefreshAsync();
         if (errors.Count > 0) await MessageDialog.ShowAsync(this, "Drag and drop", string.Join("\n", errors));
         else ReportStatus($"{undo.Count} items {(copy ? "copied" : "moved")}.");
@@ -350,6 +388,9 @@ public sealed class FilePane : UserControl
             return item;
         }
         menu.Items.Add(Make("Aç", OpenSelection));
+        var openWith = new MenuItem { Header = UiText.T("Birlikte Aç") };
+        openWith.Items.Add(Make("Uygulama seç…  (Ctrl+Shift+O)", () => _ = OpenWithSelectedAsync()));
+        menu.Items.Add(openWith);
         menu.Items.Add(new Separator());
         menu.Items.Add(Make("Kopyala  (Ctrl+C)", () => _ = win.SetClipboardAsync(SelectedPaths(), ClipboardMode.Copy, this)));
         menu.Items.Add(Make("Kes  (Ctrl+X)", () => _ = win.SetClipboardAsync(SelectedPaths(), ClipboardMode.Cut, this)));
@@ -389,9 +430,9 @@ public sealed class FilePane : UserControl
         return menu;
     }
 
-    public async Task NavigateAsync(string path, bool record = true, int historyDelta = 0, bool resolveRelative = false)
+    public async Task<NavigationResult> NavigateAsync(string path, bool record = true, int historyDelta = 0, bool resolveRelative = false)
     {
-        if (string.IsNullOrWhiteSpace(path)) return;
+        if (string.IsNullOrWhiteSpace(path)) return NavigationResult.Failure("Konum boş.");
         long requestVersion = generation;
         try
         {
@@ -401,10 +442,11 @@ public sealed class FilePane : UserControl
             if (path.StartsWith("~/", StringComparison.Ordinal) || path == "~")
                 path = System.IO.Path.Combine(MainWindow.HomePath(), path == "~" ? "" : path[2..]);
             path = System.IO.Path.GetFullPath(path);
-            if (!Directory.Exists(path))
+            if (!KioAdmin.Enabled && !Directory.Exists(path))
             {
-                if (requestVersion == generation) ReportStatus(UiText.F("Klasör bulunamadı: {0}", path));
-                return;
+                var message = UiText.F("Klasör bulunamadı: {0}", path);
+                if (requestVersion == generation) ReportStatus(message);
+                return NavigationResult.Failure(message);
             }
             scanCts?.Cancel(); scanCts?.Dispose();
             scanCts = new CancellationTokenSource();
@@ -412,9 +454,11 @@ public sealed class FilePane : UserControl
             var version = ++generation;
             ReportStatus(UiText.T("Yükleniyor…"));
             var items = await FileSystem.ListAsync(path, token);
-            if (version != generation || token.IsCancellationRequested) return;
+            if (version != generation || token.IsCancellationRequested)
+                return NavigationResult.Failure("Konum yenilemesi iptal edildi.");
             // Do not display a history target unless the expected travel can be committed.
-            if (historyDelta != 0 && !history.CommitTravel(historyDelta, path)) return;
+            if (historyDelta != 0 && !history.CommitTravel(historyDelta, path))
+                return NavigationResult.Failure("Gezinme geçmişi güncellenemedi.");
             Path = path;
             entries = items;
             RenderCrumbs();
@@ -430,13 +474,23 @@ public sealed class FilePane : UserControl
             _ = LoadFolderSizesAsync(items, version, token);
             win.Prefs.Save();
             PathChanged?.Invoke(this);
+            return NavigationResult.Success();
         }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
-        { if (requestVersion == generation) ReportStatus(UiText.F("Konum açılamadı: {0}", ex.Message)); }
+        catch (OperationCanceledException)
+        {
+            return NavigationResult.Failure("KIO erişimi iptal edildi.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or TimeoutException or OperationCanceledException)
+        {
+            var message = UiText.F("Konum açılamadı: {0}", ex.Message);
+            if (requestVersion == generation) ReportStatus(message);
+            return NavigationResult.Failure(message);
+        }
         catch (Exception ex)
         {
-            if (requestVersion == generation) ReportStatus(UiText.F("Beklenmeyen hata: {0}: {1}", ex.GetType().Name, ex.Message));
+            var message = UiText.F("Beklenmeyen hata: {0}: {1}", ex.GetType().Name, ex.Message);
+            if (requestVersion == generation) ReportStatus(message);
+            return NavigationResult.Failure(message);
         }
     }
 
@@ -452,7 +506,7 @@ public sealed class FilePane : UserControl
         if (parent is not null) await NavigateAsync(parent.FullName);
     }
 
-    public async Task RefreshAsync() => await NavigateAsync(Path, false);
+    public async Task<NavigationResult> RefreshAsync() => await NavigateAsync(Path, false);
 
     public void FocusList() => list.Focus();
 
@@ -467,8 +521,9 @@ public sealed class FilePane : UserControl
     {
         try
         {
-            var start = new System.Diagnostics.ProcessStartInfo("ark") { UseShellExecute = false };
+            var start = new System.Diagnostics.ProcessStartInfo(TrustedTools.Require("ark")) { UseShellExecute = false };
             foreach (var arg in args) start.ArgumentList.Add(arg);
+            TrustedTools.SecurePath(start);
             System.Diagnostics.Process.Start(start);
         }
         catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
@@ -501,48 +556,19 @@ public sealed class FilePane : UserControl
     {
         var paths = SelectedPaths();
         if (paths.Count == 0) { ReportStatus("Select files to compress."); return; }
-        var baseName = paths.Count == 1 ? System.IO.Path.GetFileName(paths[0].TrimEnd('/')) : "Arsiv";
-        var extension = "." + format;
-        var target = System.IO.Path.Combine(Path, baseName + extension);
-        int number = 2;
-        while (File.Exists(target) || Directory.Exists(target))
-            target = System.IO.Path.Combine(Path, baseName + " (" + number++ + ")" + extension);
         try
         {
-            var info = new System.Diagnostics.ProcessStartInfo(format == "tar.gz" ? "tar" : "7z")
-            {
-                UseShellExecute = false, WorkingDirectory = Path,
-                RedirectStandardError = true, RedirectStandardOutput = true,
-                CreateNoWindow = true
-            };
-            if (format == "tar.gz") { info.ArgumentList.Add("-czf"); info.ArgumentList.Add(target); }
-            else
-            {
-                info.ArgumentList.Add("a");
-                info.ArgumentList.Add("-t" + format);
-                info.ArgumentList.Add(target);
-            }
-            foreach (var path in paths)
-                info.ArgumentList.Add("./" + System.IO.Path.GetFileName(path.TrimEnd('/')));
             ReportStatus("Creating archive…");
-            using var process = new System.Diagnostics.Process { StartInfo = info };
-            process.Start();
-            var errors = process.StandardError.ReadToEndAsync();
-            var output = process.StandardOutput.ReadToEndAsync();
-            await process.WaitForExitAsync();
-            await Task.WhenAll(errors, output);
-            if (process.ExitCode != 0)
-            {
-                if (File.Exists(target)) File.Delete(target);
-                await MessageDialog.ShowAsync(this, "Compression error", "Could not create archive. " + errors.Result.Take(350).Aggregate("", (a, c) => a + c));
-            }
-            else { await RefreshAsync(); ReportStatus("Archive created: " + System.IO.Path.GetFileName(target)); }
+            var archive = await SafeArchiveOperations.CreateAsync(paths, Path, format);
+            await RefreshAsync();
+            ReportStatus("Archive created: " + System.IO.Path.GetFileName(archive));
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            System.ComponentModel.Win32Exception or TimeoutException or ArgumentException or OperationCanceledException)
         { await MessageDialog.ShowAsync(this, "Compression error", ex.Message); }
     }
 
-    private void OpenSelection()
+    private async void OpenSelection()
     {
         if (list.SelectedItem is not FileEntry entry) return;
         if (entry.IsDirectory) _ = NavigateAsync(entry.FullPath);
@@ -550,12 +576,56 @@ public sealed class FilePane : UserControl
         {
             try
             {
+                if (OperatingSystem.IsLinux() && UntrustedLauncher.IsPotentiallyExecutable(entry.FullPath))
+                {
+                    var description = UntrustedLauncher.Describe(entry.FullPath);
+                    if (!await ConfirmDialog.ShowAsync(this, "Çalıştırılabilir dosya uyarısı",
+                        $"Bu dosya komut çalıştırabilir:\n{entry.FullPath}\n\n{description}\n\nKaynağına güveniyorsanız açın.",
+                        UiText.T("Riski kabul et ve aç"), dangerous: true)) return;
+                }
                 if (OperatingSystem.IsLinux())
-                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("xdg-open") { ArgumentList = { entry.FullPath }, UseShellExecute = false });
+                {
+                    var opener = new System.Diagnostics.ProcessStartInfo(TrustedTools.Require("xdg-open"))
+                    { ArgumentList = { entry.FullPath }, UseShellExecute = false };
+                    TrustedTools.SecurePath(opener);
+                    System.Diagnostics.Process.Start(opener);
+                }
                 else System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(entry.FullPath) { UseShellExecute = true });
             }
             catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
             { ReportStatus(UiText.F("Dosya açılamadı: {0}", ex.Message)); }
+        }
+    }
+
+    public async Task OpenWithSelectedAsync()
+    {
+        if (list.SelectedItem is not FileEntry entry || entry.IsDirectory)
+        {
+            ReportStatus(UiText.T("Bir dosya seçin; klasörler için uygulama seçimi desteklenmiyor."));
+            return;
+        }
+        var file = entry.FullPath;
+        try
+        {
+            var choice = await OpenWithDialog.ShowAsync(win, file);
+            if (choice is null) return;
+            if (UntrustedLauncher.IsPotentiallyExecutable(file))
+            {
+                var description = UntrustedLauncher.Describe(file);
+                if (!await ConfirmDialog.ShowAsync(this, UiText.T("Güvenlik: çalıştırılabilir dosya"),
+                    $"{file}\n\n{description}\n\nBu dosya komut çalıştırabilir. Seçilen uygulama: {choice.Application.Name}",
+                    "Riski kabul et ve aç", dangerous: true)) return;
+            }
+            if (choice.MakeDefault)
+                await OpenWithService.SetDefaultAsync(choice.MimeType, choice.Application);
+            await OpenWithService.LaunchAsync(choice.Application, file);
+            ReportStatus($"{System.IO.Path.GetFileName(file)} → {choice.Application.Name}" +
+                (choice.MakeDefault ? "  · Varsayılan uygulama güncellendi" : ""));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or
+            System.ComponentModel.Win32Exception or TimeoutException or ArgumentException or OperationCanceledException)
+        {
+            await MessageDialog.ShowAsync(this, UiText.T("Birlikte Aç"), ex.Message);
         }
     }
 
@@ -578,6 +648,8 @@ public sealed class FilePane : UserControl
                 _ = win.SetClipboardAsync(SelectedPaths(), ClipboardMode.Cut, this); e.Handled = true; break;
             case Key.V when e.KeyModifiers.HasFlag(KeyModifiers.Control):
                 _ = PasteAsync(); e.Handled = true; break;
+            case Key.O when e.KeyModifiers.HasFlag(KeyModifiers.Control) && e.KeyModifiers.HasFlag(KeyModifiers.Shift):
+                _ = OpenWithSelectedAsync(); e.Handled = true; break;
             case Key.F2 when e.KeyModifiers.HasFlag(KeyModifiers.Control):
                 _ = BulkRenameSelectedAsync(); e.Handled = true; break;
             case Key.F2:
@@ -600,32 +672,54 @@ public sealed class FilePane : UserControl
         else ReportStatus($"{restored} file operations undone.");
     }
 
+    private Task<bool> ConfirmRootMutationAsync(string operation, IReadOnlyList<string> paths, string destination)
+    {
+        var sourcePreview = string.Join("\n", paths.Take(8).Select(x => "• " + x));
+        if (paths.Count > 8) sourcePreview += $"\n… ve {paths.Count - 8} diğer öğe";
+        return ConfirmDialog.ShowAsync(this, "KIO-ADMIN: " + operation,
+            $"ROOT yetkisiyle {operation.ToLowerInvariant()} işlemi uygulanacak.\n\nKaynaklar:\n{sourcePreview}\n\nHedef: {destination}\n\nBu işlem sistem dosyalarını değiştirebilir.",
+            "Root işlemini uygula", dangerous: true);
+    }
+
     public async Task PasteAsync()
     {
         if (!win.HasClipboard || string.IsNullOrEmpty(Path)) return;
-        var total = win.ClipboardPaths.Count;
+        var clipboard = win.ClipboardPaths.ToList();
+        var admin = KioAdmin.Enabled;
+        if (admin)
+        {
+            if (!await ConfirmRootMutationAsync(clipboard.Any(x => x.Mode == ClipboardMode.Cut) ? "Taşı" : "Kopyala",
+                clipboard.Select(x => x.Path).ToList(), Path)) return;
+            if (!KioAdmin.Enabled) return;
+        }
+        var total = clipboard.Count;
         var done = 0;
         var failures = new List<string>();
         var undoSteps = new List<FileUndo.Step>();
         try
         {
-            foreach (var (source, mode) in win.ClipboardPaths)
+            foreach (var (source, mode) in clipboard)
             {
                 ReportStatus(UiText.F("Yapıştırılıyor… {0}/{1}", done + 1, total));
                 try
                 {
-                    if (mode == ClipboardMode.Cut) await SafeFileOperations.MoveAsync(source, Path);
+                    if (admin)
+                    {
+                        if (mode == ClipboardMode.Cut) await KioAdmin.MoveAsync(source, Path);
+                        else await KioAdmin.CopyAsync(source, Path);
+                    }
+                    else if (mode == ClipboardMode.Cut) await SafeFileOperations.MoveAsync(source, Path);
                     else await SafeFileOperations.CopyAsync(source, Path);
                     undoSteps.Add(new FileUndo.Step(mode == ClipboardMode.Cut ? FileUndo.Kind.Move : FileUndo.Kind.Copy,
                         source, System.IO.Path.Combine(Path, System.IO.Path.GetFileName(source))));
                 }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or OperationCanceledException)
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or TimeoutException or OperationCanceledException)
                 {
                     failures.Add($"{System.IO.Path.GetFileName(source)}: {ex.Message}");
                 }
                 done++;
             }
-            win.UndoHistory.Record(undoSteps);
+            if (!admin) win.UndoHistory.Record(undoSteps);
             if (win.ClipboardMode == ClipboardMode.Cut) win.ClearClipboard();
             await RefreshAsync();
             if (failures.Count > 0)
@@ -642,6 +736,11 @@ public sealed class FilePane : UserControl
     {
         var paths = SelectedPaths();
         if (paths.Count < 2) { ReportStatus("Select at least two items for bulk rename."); return; }
+        if (KioAdmin.Enabled)
+        {
+            await MessageDialog.ShowAsync(this, "KIO-Admin", "Yönetici modunda toplu yeniden adlandırma henüz desteklenmiyor.");
+            return;
+        }
         if (await BulkRename.ShowAsync(win, paths))
         {
             await RefreshAsync();
@@ -657,13 +756,23 @@ public sealed class FilePane : UserControl
         if (string.IsNullOrWhiteSpace(text)) return;
         try
         {
-            await SafeFileOperations.RenameAsync(entry.FullPath, text);
-            win.UndoHistory.Record([new FileUndo.Step(FileUndo.Kind.Rename, entry.FullPath,
-                System.IO.Path.Combine(System.IO.Path.GetDirectoryName(entry.FullPath)!, text))]);
+            if (KioAdmin.Enabled)
+            {
+                if (!await ConfirmRootMutationAsync("Yeniden adlandır", [entry.FullPath],
+                    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(entry.FullPath)!, text))) return;
+                if (!KioAdmin.Enabled) return;
+                await KioAdmin.RenameAsync(entry.FullPath, text);
+            }
+            else
+            {
+                await SafeFileOperations.RenameAsync(entry.FullPath, text);
+                win.UndoHistory.Record([new FileUndo.Step(FileUndo.Kind.Rename, entry.FullPath,
+                    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(entry.FullPath)!, text))]);
+            }
             await RefreshAsync();
             ReportStatus(UiText.T("Yeniden adlandırıldı."));
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or TimeoutException or OperationCanceledException)
         { await MessageDialog.ShowAsync(this, "Yeniden adlandırma", ex.Message); }
         list.Focus();
     }
@@ -674,18 +783,28 @@ public sealed class FilePane : UserControl
         if (items.Count == 0) return;
         var names = items.Select(System.IO.Path.GetFileName).ToList();
         var preview = string.Join(", ", names.Take(6)) + (names.Count > 6 ? $" … +{names.Count - 6}" : "");
-        if (!await ConfirmDialog.ShowAsync(this, "Çöp kutusuna taşı",
-            UiText.F("{0} öğe çöp kutusuna taşınacak:\n{1}\n\nÇöp kutusundan geri alınabilir.", names.Count, preview), "Çöp kutusuna taşı")) return;
+        var admin = KioAdmin.Enabled;
+        if (!await ConfirmDialog.ShowAsync(this, admin ? "KIO-Admin: Kalıcı sil" : "Çöp kutusuna taşı",
+            admin ? $"{names.Count} öğe KALICI olarak silinecek (çöp kutusu yok):\n{preview}" :
+            UiText.F("{0} öğe çöp kutusuna taşınacak:\n{1}\n\nÇöp kutusundan geri alınabilir.", names.Count, preview),
+            admin ? "Kalıcı sil" : "Çöp kutusuna taşı", dangerous: admin)) return;
+        if (admin && !KioAdmin.Enabled) return;
         var failures = new List<string>();
         foreach (var item in items)
         {
-            try { SafeFileOperations.Trash(item); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            try { if (admin) await KioAdmin.RemoveAsync(item); else SafeFileOperations.Trash(item); }
+            catch (TrashUnavailableException ex)
+            {
+                failures.Add($"{System.IO.Path.GetFileName(item)}: {ex.Message} Dosya korunmuştur.");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or TimeoutException or OperationCanceledException)
             { failures.Add($"{System.IO.Path.GetFileName(item)}: {ex.Message}"); }
         }
         await RefreshAsync();
+        win.RefreshTrashView();
         if (failures.Count > 0) await MessageDialog.ShowAsync(this, "Çöp kutusu", string.Join("\n", failures));
-        else ReportStatus(UiText.F("{0} öğe çöp kutusuna taşındı.", names.Count));
+        else ReportStatus(admin ? $"{names.Count} öğe kalıcı olarak silindi." :
+            UiText.F("{0} öğe çöp kutusuna taşındı.", names.Count));
         list.Focus();
     }
 
@@ -852,7 +971,7 @@ public sealed class FilePane : UserControl
                 if (new FileInfo(path).Length <= 80 * 1024 * 1024)
                     using (var stream = File.OpenRead(path)) decoded = Bitmap.DecodeToWidth(stream, 160);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or TimeoutException or OperationCanceledException) { }
             Dispatcher.UIThread.Post(() =>
             {
                 pendingThumbs.Remove(path);
@@ -906,7 +1025,7 @@ public sealed class FilePane : UserControl
                     if (new FileInfo(file).Length <= 80 * 1024 * 1024)
                         using (var stream = File.OpenRead(file)) image = Bitmap.DecodeToWidth(stream, 600);
                 }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or TimeoutException or OperationCanceledException) { }
                 Dispatcher.UIThread.Post(() =>
                 {
                     if (token.IsCancellationRequested) { image?.Dispose(); return; }
@@ -1066,7 +1185,7 @@ public static class ConfirmDialog
 {
     private static Window? OwnerWindow(Control owner) => owner as Window ?? owner.GetVisualAncestors().OfType<Window>().FirstOrDefault();
 
-    public static async Task<bool> ShowAsync(Control owner, string title, string message, string acceptText)
+    public static async Task<bool> ShowAsync(Control owner, string title, string message, string acceptText, bool dangerous = false)
     {
         var window = OwnerWindow(owner);
         if (window is null) return false;
@@ -1086,14 +1205,15 @@ public static class ConfirmDialog
         {
             Content = UiText.T(acceptText), Padding = new Thickness(18, 8),
             Background = MainWindow.AccentBrush, Foreground = MainWindow.CanvasBrush,
-            IsDefault = true
+            IsDefault = !dangerous
         };
         accept.Click += (_, _) => { result = true; dialog.Close(); };
         var cancel = new Button
         {
             Content = UiText.T("Vazgeç"), Padding = new Thickness(18, 8),
             Background = MainWindow.SurfaceBrush, Foreground = MainWindow.TextPrimary,
-            BorderBrush = MainWindow.StrokeBrush, BorderThickness = new Thickness(1)
+            BorderBrush = MainWindow.StrokeBrush, BorderThickness = new Thickness(1),
+            IsDefault = dangerous
         };
         cancel.Click += (_, _) => dialog.Close();
         buttons.Children.Add(cancel);
@@ -1106,10 +1226,15 @@ public static class ConfirmDialog
         });
         panel.Children.Add(buttons);
         dialog.Content = panel;
-        // Standard modal keyboard contract: Enter accepts, Escape cancels.
+        // Destructive actions need a deliberate button click; Enter never accepts.
+        dialog.Opened += (_, _) => cancel.Focus();
         dialog.AddHandler(Avalonia.Input.InputElement.KeyDownEvent, (_, e) =>
         {
-            if (e.Key == Key.Enter) { result = true; dialog.Close(); e.Handled = true; }
+            if (e.Key == Key.Enter)
+            {
+                if (!dangerous) result = true;
+                dialog.Close(); e.Handled = true;
+            }
             else if (e.Key == Key.Escape) { dialog.Close(); e.Handled = true; }
         }, RoutingStrategies.Tunnel);
         await dialog.ShowDialog(window);

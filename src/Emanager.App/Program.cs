@@ -1,4 +1,5 @@
 using Avalonia;
+using System.Runtime.InteropServices;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Styling;
 using Avalonia.Themes.Fluent;
@@ -8,7 +9,19 @@ namespace Emanager.App;
 internal static class Program
 {
     [STAThread]
-    public static void Main(string[] args) => BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
+
+    public static void Main(string[] args)
+    {
+        if (OperatingSystem.IsLinux() && GetEffectiveUserId() == 0)
+        {
+            Console.Error.WriteLine("Emanager root olarak başlatılamaz. Normal kullanıcı olarak açıp KIO-Admin/Polkit kullanın.");
+            Environment.ExitCode = 1;
+            return;
+        }
+        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+    }
     public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<EmanagerApplication>().UsePlatformDetect().LogToTrace();
     public static void SetTheme(bool dark) => EmanagerApplication.SetTheme(dark);
 }
@@ -47,8 +60,31 @@ public sealed class EmanagerApplication : Application
         => Report("DOMAIN", e.ExceptionObject as Exception);
     private static void Report(string stage, Exception? ex)
     {
-        Console.Error.WriteLine($"EMANAGER-UNHANDLED-{stage}: {ex}");
-        try { File.AppendAllText(Path.Combine(UserFolders.ConfigDirectory, "crash.log"), $"[{DateTime.UtcNow:O}] {stage}: {ex}\n"); }
+        // Avoid dumping raw file paths, stack traces or credentials to crash logs.
+        var line = $"[{DateTime.UtcNow:O}] {stage}: {ex?.GetType().FullName ?? "Unknown"}\n";
+        Console.Error.Write(line);
+        try
+        {
+            Directory.CreateDirectory(UserFolders.ConfigDirectory);
+            var path = Path.Combine(UserFolders.ConfigDirectory, "crash.log");
+            if (OperatingSystem.IsLinux())
+            {
+                try { if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint)) return; }
+                catch (FileNotFoundException) { }
+                catch (DirectoryNotFoundException) { }
+            }
+            var options = new FileStreamOptions
+            {
+                Mode = FileMode.OpenOrCreate, Access = FileAccess.ReadWrite, Share = FileShare.None
+            };
+            if (OperatingSystem.IsLinux()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            using var output = new FileStream(path, options);
+            if (OperatingSystem.IsLinux()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            if (output.Length > 1024 * 1024) output.SetLength(0);
+            output.Seek(0, SeekOrigin.End);
+            using var writer = new StreamWriter(output);
+            writer.Write(line);
+        }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }

@@ -1,4 +1,5 @@
 using Avalonia;
+using System.Runtime.InteropServices;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
@@ -13,6 +14,9 @@ namespace Emanager.App;
 
 public sealed class MainWindow : Window
 {
+    [DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
+    private static bool IsRoot => OperatingSystem.IsLinux() && GetEffectiveUserId() == 0;
     private readonly Preferences prefs = Preferences.Load();
     internal FileUndo UndoHistory { get; } = new();
     private sealed record WindowStateSnapshot(
@@ -44,6 +48,8 @@ public sealed class MainWindow : Window
 
     private readonly StackPanel sidebar = new() { Spacing = 6, Margin = new Thickness(14, 14) };
     private readonly DispatcherTimer deviceTimer = new() { Interval = TimeSpan.FromSeconds(4) };
+    private readonly DispatcherTimer rootIdleTimer = new() { Interval = TimeSpan.FromSeconds(20) };
+    private bool rootIdleClosing;
     private IReadOnlyList<MountedVolume> sidebarVolumes = [];
     private string deviceSnapshot = "";
     private bool deviceScanBusy;
@@ -56,9 +62,12 @@ public sealed class MainWindow : Window
     private bool terminalBusy;
     private readonly TextBlock status = new() { Text = UiText.T("Hazır"), FontSize = 12 };
     private readonly Button themeBox = new();
+    private Button rootModeButton = null!;
     private readonly StackPanel tabStripPanel = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
     private readonly Grid paneArea = new();
     private readonly List<FilePane> panes = [];
+    private TrashView? trashView;
+    private bool trashVisible;
     private FilePane? active;
     private IDisposable? searchSubscription;
     private List<(string Path, ClipboardMode Mode)> clipboardFiles = [];
@@ -74,7 +83,7 @@ public sealed class MainWindow : Window
         pathBox.Watermark = UiText.T("Konum yazın veya Ctrl+L");
         searchBox.Watermark = UiText.T("⌕  Bu klasörde ara");
         status.Text = UiText.T("Hazır");
-        Title = "Emanager — Linux";
+        Title = IsRoot ? "Emanager — Linux [ROOT]" : "Emanager — Linux";
         Width = 1320; Height = 820;
         MinWidth = 850; MinHeight = 520;
         Background = CanvasBrush;
@@ -95,7 +104,7 @@ public sealed class MainWindow : Window
                 catch (Exception ex) when (ex is UriFormatException or ArgumentException or NotSupportedException) { }
             }
             var start = requestedFolder ?? (Directory.Exists(prefs.LastDirectory) ? prefs.LastDirectory : HomePath());
-            if (restoreState is null)
+            if (requestedFolder is not null || restoreState is null)
                 await NewTabAsync(start);
             else
                 await RestoreTabsAsync(restoreState);
@@ -103,7 +112,35 @@ public sealed class MainWindow : Window
             deviceTimer.Start();
         };
         deviceTimer.Tick += (_, _) => _ = RefreshDevicesAsync();
-        Closing += (_, _) => { deviceTimer.Stop(); prefs.Save(); };
+        rootIdleTimer.Tick += async (_, _) =>
+        {
+            if (!adminMode || rootIdleClosing || !KioAdmin.IsIdleFor(TimeSpan.FromMinutes(5))) return;
+            rootIdleClosing = true;
+            try { await DisableAdminModeAsync("Root oturumu 5 dakika işlem yapılmadığı için kapatıldı."); }
+            catch (Exception ex) { status.Text = "Root oturumu kapatma hatası: " + ex.Message; }
+            finally { rootIdleClosing = false; }
+        };
+        Closing += async (_, e) =>
+        {
+            if (safeToClose) return;
+            e.Cancel = true;
+            if (closingInProgress) return;
+            closingInProgress = true;
+            deviceTimer.Stop();
+            rootIdleTimer.Stop();
+            try
+            {
+                await KioAdmin.DisableAsync();
+                prefs.Save();
+                safeToClose = true;
+                Close();
+            }
+            catch (Exception ex)
+            {
+                closingInProgress = false;
+                status.Text = "Yönetici işlemleri durdurulamadı: " + ex.Message;
+            }
+        };
     }
 
     internal Preferences Prefs => prefs;
@@ -266,6 +303,9 @@ public sealed class MainWindow : Window
         nav.Children.Add(networkButton);
         nav.Children.Add(MakeBtn("⌨ Terminal", () => OpenTerminalAt(ActivePane()?.Path ?? HomePath()), "Open a terminal in the current folder"));
         nav.Children.Add(MakeBtn(UiText.T("⌕ Gelişmiş ara"), () => _ = ShowAdvancedSearchAsync(), "İndekssiz alt klasör araması"));
+        rootModeButton = MakeBtn("🔒 Root kullanıcı",
+            () => _ = ToggleRootModeAsync(), "Polkit ile yönetici dosya bağlantısı aç/kapat");
+        nav.Children.Add(rootModeButton);
         toolbar.Children.Add(nav);
         // The permanent address field is intentionally removed to keep this
         // toolbar compact. Ctrl+L still opens a location entry dialog.
@@ -432,6 +472,7 @@ public sealed class MainWindow : Window
 
     private async Task NewTabAsync(string path)
     {
+        trashVisible = false;
         var left = CreatePane();
         tabs.Add((left, null));
         ActiveTabIndex = tabs.Count - 1;
@@ -444,6 +485,7 @@ public sealed class MainWindow : Window
     private void SwitchTab(int index)
     {
         if (index < 0 || index >= tabs.Count || (index == ActiveTabIndex && active == tabs[index].Left)) return;
+        trashVisible = false;
         ActiveTabIndex = index;
         var (left, right) = tabs[index];
         active = right ?? left;
@@ -496,6 +538,7 @@ public sealed class MainWindow : Window
     internal void SetActivePane(FilePane pane)
     {
         if (!panes.Contains(pane)) return;
+        trashVisible = false;
         active = pane;
         pathBox.Text = pane.Path;
     }
@@ -514,6 +557,14 @@ public sealed class MainWindow : Window
     {
         paneArea.Children.Clear();
         paneArea.ColumnDefinitions = new ColumnDefinitions();
+        if (trashVisible)
+        {
+            paneArea.ColumnDefinitions = new ColumnDefinitions("*");
+            trashView ??= new TrashView(this);
+            Grid.SetColumn(trashView, 0);
+            paneArea.Children.Add(trashView);
+            return;
+        }
         if (ActiveTabIndex >= tabs.Count) return;
         var (left, right) = tabs[ActiveTabIndex];
         if (right is null)
@@ -638,6 +689,7 @@ public sealed class MainWindow : Window
             proc.StartInfo = new System.Diagnostics.ProcessStartInfo("/usr/bin/bash")
             { WorkingDirectory = terminalDirectory, RedirectStandardOutput = true,
                 RedirectStandardError = true, RedirectStandardInput = true, UseShellExecute = false, CreateNoWindow = true };
+            TrustedTools.SecurePath(proc.StartInfo);
             proc.StartInfo.ArgumentList.Add("-c"); proc.StartInfo.ArgumentList.Add(command);
             proc.Start();
             proc.StandardInput.Close();
@@ -672,14 +724,111 @@ public sealed class MainWindow : Window
         return AdvancedSearch.ShowAsync(this, pane.Path, path => pane.NavigateAsync(path));
     }
 
+    private bool adminMode;
+    private bool safeToClose;
+    private bool closingInProgress;
+
+    private void RefreshAdminIndicators()
+    {
+        foreach (var pane in panes) pane.RefreshAdminIndicator();
+    }
+
+    private async Task DisableAdminModeAsync(string? notice = null)
+    {
+        rootModeButton.IsEnabled = false;
+        rootIdleTimer.Stop();
+        status.Text = "KIO-Admin işlemleri durduruluyor…";
+        try
+        {
+            await KioAdmin.DisableAsync();
+            adminMode = false;
+            rootModeButton.Content = "🔒 Root kullanıcı";
+            rootModeButton.Background = SurfaceBrush;
+            rootModeButton.Foreground = TextPrimary;
+            Title = "Emanager — Linux";
+            RefreshAdminIndicators();
+            foreach (var pane in panes)
+            {
+                if (!Directory.Exists(pane.Path)) await pane.NavigateAsync(HomePath());
+                else await pane.RefreshAsync();
+            }
+            status.Text = notice ?? "KIO-Admin kapatıldı.";
+        }
+        finally { rootModeButton.IsEnabled = true; }
+    }
+
+    private async Task ToggleRootModeAsync()
+    {
+        var pane = ActivePane();
+        if (pane is null)
+        {
+            await MessageDialog.ShowAsync(this, "KIO-Admin", "Önce bir dosya paneli açın.");
+            return;
+        }
+        if (adminMode)
+        {
+            try { await DisableAdminModeAsync(); }
+            catch (Exception ex) { status.Text = "KIO-Admin kapanış hatası: " + ex.Message; }
+            return;
+        }
+        if (!File.Exists("/usr/bin/kioclient") || !File.Exists("/usr/libexec/kf6/kio-admin-helper"))
+        {
+            await MessageDialog.ShowAsync(this, "KIO-Admin", "KDE KIO-Admin altyapısı kurulu değil.");
+            return;
+        }
+        if (!await ConfirmDialog.ShowAsync(this, "KDE KIO-Admin",
+            "KDE Polkit ile yönetici dosya erişimi açılacak. Sistem dosyalarındaki değişiklikler geri alınamayabilir.",
+            "Yönetici erişimini aç", dangerous: true)) return;
+        rootModeButton.IsEnabled = false;
+        try
+        {
+            status.Text = "KDE KIO-Admin yetkilendiriliyor…";
+            // The first real panel refresh is the authorization request. A
+            // separate admin:///etc probe immediately followed by this refresh
+            // caused two KIO worker launches and could produce two Polkit
+            // prompts before the KDE auth_admin_keep cache was warm.
+            KioAdmin.Enable();
+            var refresh = await pane.RefreshAsync();
+            if (!refresh.Succeeded)
+            {
+                await KioAdmin.DisableAsync();
+                adminMode = false;
+                RefreshAdminIndicators();
+                rootIdleTimer.Stop();
+                await MessageDialog.ShowAsync(this, "KIO-Admin açılamadı",
+                    refresh.ErrorMessage ?? "KIO erişimi doğrulanamadı.");
+                return;
+            }
+            if (closingInProgress || safeToClose) return;
+            adminMode = true;
+            RefreshAdminIndicators();
+            rootIdleTimer.Start();
+            rootModeButton.Content = "🔓 ROOT AKTİF";
+            rootModeButton.Background = new SolidColorBrush(Color.Parse("#A52B39"));
+            rootModeButton.Foreground = Brushes.White;
+            Title = "Emanager — Linux [KIO-ADMIN]";
+            status.Text = "KDE KIO-Admin dosya erişimi etkin.";
+        }
+        catch (Exception ex) when (ex is IOException or TimeoutException or OperationCanceledException or System.ComponentModel.Win32Exception)
+        {
+            await KioAdmin.DisableAsync();
+            adminMode = false;
+            RefreshAdminIndicators();
+            rootIdleTimer.Stop();
+            await MessageDialog.ShowAsync(this, "KIO-Admin açılamadı", ex.Message);
+        }
+        finally { rootModeButton.IsEnabled = true; }
+    }
+
     internal void OpenTerminalAt(string path)
     {
         try
         {
             string? term = new[] { "x-terminal-emulator", "konsole", "gnome-terminal", "xfce4-terminal", "xterm" }
-                .FirstOrDefault(cmd => Paths.ExecutableExists(cmd));
+                .Select(TrustedTools.Resolve).FirstOrDefault(cmd => cmd is not null);
             if (term is null) { status.Text = UiText.T("Uygun terminal bulunamadı."); return; }
             var info = new System.Diagnostics.ProcessStartInfo(term) { WorkingDirectory = path, UseShellExecute = false };
+            TrustedTools.SecurePath(info);
             System.Diagnostics.Process.Start(info);
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or UnauthorizedAccessException)
@@ -727,6 +876,17 @@ public sealed class MainWindow : Window
     private void RenderSidebar()
     {
         sidebar.Children.Clear();
+        SidebarLabel("KÜTÜPHANE");
+        var trashButton = MakeBtn("🗑️    Çöp Kutusu", ShowTrash, "Silinen dosyaları görüntüle ve geri yükle");
+        trashButton.HorizontalAlignment = HorizontalAlignment.Stretch;
+        trashButton.HorizontalContentAlignment = HorizontalAlignment.Left;
+        trashButton.Background = trashVisible ? SurfaceBrush : Brushes.Transparent;
+        trashButton.BorderBrush = trashVisible ? AccentBrush : StrokeBrush;
+        trashButton.BorderThickness = trashVisible ? new Thickness(1) : new Thickness(0);
+        trashButton.CornerRadius = new CornerRadius(9);
+        trashButton.Foreground = trashVisible ? AccentBrush : TextPrimary;
+        trashButton.Padding = new Thickness(13, 9);
+        sidebar.Children.Add(trashButton);
         SidebarLabel("HIZLI ERİŞİM");
         foreach (var (label, path) in UserFolders.Standard()) SidebarEntry("⌂", label, path);
         foreach (var pin in prefs.Pins.Distinct(StringComparer.Ordinal).Where(Directory.Exists))
@@ -794,6 +954,25 @@ public sealed class MainWindow : Window
         sidebar.Children.Add(themeBox);
     }
 
+    private void ShowTrash()
+    {
+        trashVisible = true;
+        trashView ??= new TrashView(this);
+        trashView.Reload();
+        RebuildPaneArea();
+        RenderSidebar();
+    }
+
+    private void ShowPaneArea()
+    {
+        if (!trashVisible) return;
+        trashVisible = false;
+        RebuildPaneArea();
+        RenderSidebar();
+    }
+
+    internal void RefreshTrashView() => trashView?.Reload();
+
     private async Task DisconnectNetworkAsync(string path)
     {
         try
@@ -860,7 +1039,11 @@ public sealed class MainWindow : Window
     private void SidebarEntry(string symbol, string label, string path, string? tip = null)
     {
         var current = ActivePane()?.Path;
-        var btn = MakeBtn($"{symbol}    {label}", () => _ = ActivePane()?.NavigateAsync(path), tip ?? path);
+        var btn = MakeBtn($"{symbol}    {label}", () =>
+        {
+            ShowPaneArea();
+            _ = ActivePane()?.NavigateAsync(path);
+        }, tip ?? path);
         btn.HorizontalAlignment = HorizontalAlignment.Stretch;
         btn.HorizontalContentAlignment = HorizontalAlignment.Left;
         bool selected = string.Equals(path, current, StringComparison.Ordinal);
@@ -892,6 +1075,9 @@ public sealed class MainWindow : Window
         { _ = ActivePane()?.UndoLastAsync(); e.Handled = true; return; }
         if (e.Key == Key.V && e.KeyModifiers.HasFlag(KeyModifiers.Control)) { _ = ActivePane()?.PasteAsync(); e.Handled = true; return; }
         if (e.Key == Key.Delete && e.Source is not TextBox) { _ = ActivePane()?.TrashSelectedAsync(); e.Handled = true; return; }
+        if (e.Key == Key.O && e.KeyModifiers.HasFlag(KeyModifiers.Control) &&
+            e.KeyModifiers.HasFlag(KeyModifiers.Shift) && e.Source is not TextBox)
+        { _ = ActivePane()?.OpenWithSelectedAsync(); e.Handled = true; return; }
         if (e.Key == Key.F2 && e.Source is not TextBox) { _ = ActivePane()?.RenameSelectedAsync(); e.Handled = true; return; }
         if (e.Key == Key.C && e.KeyModifiers.HasFlag(KeyModifiers.Control) && e.Source is not TextBox)
         { var p = ActivePane(); if (p is not null) _ = SetClipboardAsync(p.SelectedPaths(), ClipboardMode.Copy, p); e.Handled = true; return; }
@@ -937,7 +1123,5 @@ internal sealed class TextObserver(Action action) : IObserver<string?>
 
 internal static class Paths
 {
-    public static bool ExecutableExists(string command) => (Environment.GetEnvironmentVariable("PATH") ?? "")
-        .Split(System.IO.Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
-        .Any(dir => File.Exists(System.IO.Path.Combine(dir, command)));
+    public static bool ExecutableExists(string command) => TrustedTools.Resolve(command) is not null;
 }

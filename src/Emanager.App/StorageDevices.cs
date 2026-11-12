@@ -16,13 +16,14 @@ public static class StorageDevices
         try
         {
             using var process = new Process();
-            process.StartInfo = new ProcessStartInfo("lsblk")
+            process.StartInfo = new ProcessStartInfo("/usr/bin/lsblk")
             {
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+            TrustedTools.SecurePath(process.StartInfo);
             foreach (var arg in new[] { "--json", "--bytes", "--output",
                 "NAME,PATH,TYPE,FSTYPE,LABEL,SIZE,MOUNTPOINTS,RM,TRAN,PARTTYPE" })
                 process.StartInfo.ArgumentList.Add(arg);
@@ -136,13 +137,14 @@ public static class StorageDevices
         if (volume.IsMounted) return volume.MountPoint;
 
         using var process = new Process();
-        process.StartInfo = new ProcessStartInfo("udisksctl")
+        process.StartInfo = new ProcessStartInfo("/usr/bin/udisksctl")
         {
             UseShellExecute = false,
             RedirectStandardError = true,
             RedirectStandardOutput = true,
             CreateNoWindow = true
         };
+        TrustedTools.SecurePath(process.StartInfo);
         process.StartInfo.ArgumentList.Add("mount");
         process.StartInfo.ArgumentList.Add("--block-device");
         process.StartInfo.ArgumentList.Add(device);

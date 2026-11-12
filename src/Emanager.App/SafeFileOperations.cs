@@ -3,6 +3,11 @@ using System.Security.Cryptography;
 
 namespace Emanager.App;
 
+public sealed class TrashUnavailableException : IOException
+{
+    public TrashUnavailableException(string message, Exception? inner = null) : base(message, inner) { }
+}
+
 /// <summary>
 /// Conservative regular-file copy. The destination is published only after a complete
 /// copy, using a same-directory staging file and a no-overwrite rename.
@@ -257,7 +262,7 @@ public static class SafeFileOperations
             {
                 if (OperatingSystem.IsLinux())
                 {
-                    if (RenameLibc(input, output) != 0)
+                    if (RenameNoReplace(input, output) != 0)
                         throw new IOException($"rename failed (errno {Marshal.GetLastPInvokeError()})");
                 }
                 else
@@ -292,8 +297,14 @@ public static class SafeFileOperations
         DeleteRecursive(input);
     }
 
-    [DllImport("libc", EntryPoint = "rename", SetLastError = true)]
-    private static extern int RenameLibc(string oldPath, string newPath);
+    // Linux renameat2 RENAME_NOREPLACE atomically refuses a newly created
+    // destination. Plain rename(2) silently overwrites a racing path.
+    [DllImport("libc", EntryPoint = "renameat2", SetLastError = true)]
+    private static extern int RenameNoReplaceNative(int oldDirFd, string oldPath,
+        int newDirFd, string newPath, uint flags);
+
+    private static int RenameNoReplace(string source, string destination) =>
+        RenameNoReplaceNative(-100, source, -100, destination, 1);
 
     /// <summary>Renames inside the containing directory; never overwrites.</summary>
     public static Task RenameAsync(string source, string newName, CancellationToken ct = default)
@@ -301,7 +312,8 @@ public static class SafeFileOperations
         ArgumentException.ThrowIfNullOrWhiteSpace(source);
         ArgumentException.ThrowIfNullOrWhiteSpace(newName);
         ct.ThrowIfCancellationRequested();
-        if (newName.Contains(Path.DirectorySeparatorChar) || newName.Contains('/') || newName is "." or "..")
+        if (newName.Contains('\0') || newName.Contains(Path.DirectorySeparatorChar) ||
+            newName.Contains('/') || newName is "." or "..")
             throw new ArgumentException("Name must not contain path separators.", nameof(newName));
         var input = Path.GetFullPath(source);
         var parent = Directory.GetParent(input)?.FullName
@@ -315,7 +327,7 @@ public static class SafeFileOperations
             // File.Move follows symbolic links; rename(2) moves the link itself.
             if (OperatingSystem.IsLinux())
             {
-                if (RenameLibc(input, target) != 0)
+                if (RenameNoReplace(input, target) != 0)
                     throw new IOException($"rename failed (errno {Marshal.GetLastPInvokeError()})");
             }
             else
@@ -335,29 +347,20 @@ public static class SafeFileOperations
     /// <summary>
     /// Moves an entry to the freedesktop.org Trash on its own volume
     /// (~/.local/share/Trash or volume-root .Trash-uid) with info metadata.
-    /// Falls back to permanent deletion only when the trash directory cannot
-    /// be created or the cross-volume rename fails.
+    /// Never falls back to permanent deletion when trash is unavailable.
     /// </summary>
     public static void Trash(string path, string? trashRootOverride = null)
     {
         var input = Path.GetFullPath(path);
         if (!File.Exists(input) && !Directory.Exists(input) && !IsLink(input))
             throw new FileNotFoundException("Nothing to trash", input);
-        if (IsLink(input))
-        {
-            // A symlink is metadata-only; unlink directly (freedesktop spec).
-            File.Delete(input);
-            return;
-        }
         var home = UserFolders.Home;
         var trashRoot = trashRootOverride ?? (SameDevice(input, home)
             ? Path.Combine(home, ".local", "share", "Trash")
             : FindStickyVolumeTrash(input));
         if (trashRoot is null)
         {
-            // No usable sticky trash on the volume: permanent delete fallback.
-            DeleteRecursive(input);
-            return;
+            throw new TrashUnavailableException("Çöp kutusu bu diskte kullanılamıyor; kalıcı silme için ayrıca onay gerekiyor.");
         }
         var filesDir = Path.Combine(trashRoot, "files");
         var infoDir = Path.Combine(trashRoot, "info");
@@ -366,8 +369,8 @@ public static class SafeFileOperations
             Directory.CreateDirectory(filesDir);
             Directory.CreateDirectory(infoDir);
         }
-        catch (IOException) { DeleteRecursive(input); return; }
-        catch (UnauthorizedAccessException) { DeleteRecursive(input); return; }
+        catch (IOException ex) { throw new TrashUnavailableException("Çöp kutusu oluşturulamadı.", ex); }
+        catch (UnauthorizedAccessException ex) { throw new TrashUnavailableException("Çöp kutusuna erişilemiyor.", ex); }
         var name = Path.GetFileName(input.TrimEnd(Path.DirectorySeparatorChar));
         if (name.Length == 0) throw new IOException("Cannot trash a filesystem root.");
         string trashedFile, infoPath;
@@ -387,8 +390,11 @@ public static class SafeFileOperations
                 suffix++;
             }
             // Reserve the names so parallel callers cannot claim them meanwhile.
-            File.WriteAllText(infoPath,
-                $"[Trash Info]\nPath={Uri.EscapeDataString(input).Replace("%2F", "/", StringComparison.Ordinal)}\nDeletionDate={DateTime.Now:yyyy-MM-ddTHH:mm:ss}\n");
+            // CreateNew is O_EXCL on Linux: never follow an attacker-created
+            // .trashinfo symlink or overwrite another process's metadata.
+            using var metadata = new FileStream(infoPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            using var writer = new StreamWriter(metadata);
+            writer.Write($"[Trash Info]\nPath={Uri.EscapeDataString(input).Replace("%2F", "/", StringComparison.Ordinal)}\nDeletionDate={DateTime.Now:yyyy-MM-ddTHH:mm:ss}\n");
         }
         try
         {
@@ -413,13 +419,14 @@ public static class SafeFileOperations
         public ulong f_bsize, f_frsize;
         public ulong f_blocks, f_bfree, f_bavail;
         public ulong f_files, f_ffree, f_favail;
-        public ulong f_fsid;
-        public ulong f_fsid2;
-        public uint f_flag;
-        public uint f_namemax;
+        public ulong f_fsid, f_flag, f_namemax;
+        public ulong f_spare0, f_spare1, f_spare2, f_spare3, f_spare4, f_spare5;
     }
 
-    [DllImport("libc", EntryPoint = "__statvfs", SetLastError = true)]
+    // glibc exports statvfs (the __statvfs symbol is not available on Fedora).
+    // Calling the private-looking name made SameDevice silently return 0 and
+    // routed ordinary home files to a non-existent volume trash.
+    [DllImport("libc", EntryPoint = "statvfs", SetLastError = true)]
     private static extern int StatvfsLinuxNative(string path, out StatvfsLinux buf);
 
     /// <summary>Device identity for trash routing; falls back to a volume heuristic.</summary>
@@ -453,21 +460,74 @@ public static class SafeFileOperations
         if (!OperatingSystem.IsLinux()) return null;
         try
         {
-            var root = Path.GetPathRoot(path);
+            var root = FindVolumeRoot(path);
             if (root is null) return null;
-            var uid = Environment.UserName;
+            var uid = CurrentUid();
             var candidate = Path.Combine(root, $".Trash-{uid}");
             var attrs = File.GetAttributes(candidate);
-            if (!attrs.HasFlag(FileAttributes.Directory)) return null;
+            if (!attrs.HasFlag(FileAttributes.Directory) || attrs.HasFlag(FileAttributes.ReparsePoint)) return null;
             var mode = File.GetUnixFileMode(candidate);
-            // Spec requires the sticky bit (0o1000) and user ownership.
-            if (!mode.HasFlag(UnixFileMode.OtherWrite) || !mode.HasFlag((UnixFileMode)0x200)) return null;
+            // Freedesktop .Trash-<uid> is a PRIVATE user-owned directory;
+            // sticky/world-writable rules apply to the shared .Trash instead.
+            if ((mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
+                         UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0) return null;
+            using var process = new System.Diagnostics.Process();
+            process.StartInfo = new System.Diagnostics.ProcessStartInfo("/usr/bin/stat")
+            {
+                UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true
+            };
+            TrustedTools.SecurePath(process.StartInfo);
+            process.StartInfo.ArgumentList.Add("-c");
+            process.StartInfo.ArgumentList.Add("%u");
+            process.StartInfo.ArgumentList.Add("--");
+            process.StartInfo.ArgumentList.Add(candidate);
+            process.Start();
+            var owner = process.StandardOutput.ReadToEnd().Trim();
+            if (!process.WaitForExit(2000)) { process.Kill(); return null; }
+            if (process.ExitCode != 0 || owner != uid) return null;
             return candidate;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
             return null;
         }
+    }
+
+    private static string? FindVolumeRoot(string path)
+    {
+        var candidates = new List<string> { Path.GetPathRoot(path) ?? "/" };
+        try
+        {
+            candidates.AddRange(FileSystem.Volumes().Where(x => x.IsMounted).Select(x => x.MountPoint));
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return candidates.Where(x => !string.IsNullOrWhiteSpace(x) && FileSystem.IsSubpath(x, path))
+            .OrderByDescending(x => x.Length)
+            .FirstOrDefault();
+    }
+
+    private static string CurrentUid()
+    {
+        if (!OperatingSystem.IsLinux()) return Environment.UserName;
+        try
+        {
+            using var process = new System.Diagnostics.Process();
+            process.StartInfo = new System.Diagnostics.ProcessStartInfo("/usr/bin/id")
+            {
+                UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true
+            };
+            TrustedTools.SecurePath(process.StartInfo);
+            process.StartInfo.ArgumentList.Add("-u");
+            if (process.Start())
+            {
+                var output = process.StandardOutput.ReadToEnd().Trim();
+                process.WaitForExit(1000);
+                if (uint.TryParse(output, out var uid)) return uid.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception) { }
+        return Environment.UserName;
     }
 
     private static void DeleteRecursive(string path)
@@ -480,6 +540,15 @@ public static class SafeFileOperations
             else File.Delete(entry);
         }
         Directory.Delete(path);
+    }
+
+    public static void PermanentlyDelete(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var input = Path.GetFullPath(path);
+        if (!File.Exists(input) && !Directory.Exists(input) && !IsLink(input))
+            throw new FileNotFoundException("Nothing to delete", input);
+        DeleteRecursive(input);
     }
 
     private static void TryCleanupStagingDirectory(string staging)

@@ -30,9 +30,24 @@ public sealed class Preferences
         try
         {
             Directory.CreateDirectory(UserFolders.ConfigDirectory);
-            var temporary = FilePath + ".tmp";
-            File.WriteAllText(temporary, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
-            File.Move(temporary, FilePath, true);
+            var temporary = FilePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                var options = new FileStreamOptions
+                {
+                    Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None
+                };
+                if (OperatingSystem.IsLinux()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                using (var stream = new FileStream(temporary, options))
+                using (var writer = new StreamWriter(stream))
+                    writer.Write(JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+                File.Move(temporary, FilePath, true);
+                if (OperatingSystem.IsLinux()) File.SetUnixFileMode(FilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+            finally
+            {
+                try { File.Delete(temporary); } catch (IOException) { }
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
