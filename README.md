@@ -1,41 +1,59 @@
-# Emanager Linux
+# Emanager for Linux
 
-A Linux desktop file manager built with C# / .NET 8 and Avalonia 11. This is the Linux port of [Emanager](https://github.com/Teknolojik-Adam/Emanager), maintained on the `linux` branch. The original Windows implementation remains on `master`.
+Emanager is a desktop file manager for Linux, built with C# and Avalonia UI. It provides a familiar interface for browsing files, organizing folders, and accessing local storage.
 
 ## Features
 
-- Dark/light UI, tabs, dual-pane layout, breadcrumbs and folder navigation
-- File copy/move, rename, trash, session-based undo for supported operations
-- Bulk rename with preview, drag and drop, file search
-- Image thumbnails and basic preview
-- Archive operations (Ark, 7z, tar), network locations via GVfs/GIO
-- Open an external terminal in the current folder
-- English interface (localization work in progress)
+- Tabbed browsing and an optional dual-pane layout
+- File and folder navigation with breadcrumbs, history, and search
+- Copy, cut, paste, rename, and move-to-trash operations
+- List, details, and icon views
+- Quick access to common user folders and bookmarked locations
+- Hidden-file visibility, sorting, and file properties
+- Light and dark themes
+- Storage information and mounted-volume navigation
+- Network locations through GVfs (SMB and SFTP, where supported)
 
-Some integrations depend on installed Linux desktop tools. Not all GUI interactions have been comprehensively tested.
+## Requirements
 
-## Build and run
+- Linux desktop environment (X11 or Wayland)
+- .NET 8 SDK for building from source
+- Network access to restore NuGet dependencies
 
-Requires a Linux graphical session and the .NET 8 SDK.
+## Build and Run
+
+Clone the repository and switch to the Linux branch:
 
 ```bash
+git clone --branch linux https://github.com/Teknolojik-Adam/Emanager.git
+cd Emanager
 dotnet restore src/Emanager.App/Emanager.App.csproj
 dotnet build src/Emanager.App/Emanager.App.csproj -c Release
 dotnet run --project src/Emanager.App/Emanager.App.csproj
 ```
 
-Run file-operation smoke tests:
+## Network Locations
+
+Network shares use the Linux GVfs/GIO infrastructure. Depending on your distribution, additional GVfs backends may be required.
+
+Example addresses:
+
+- SMB: `smb://server/share`
+- SFTP: `sftp://user@server/`
+
+On Fedora, you can install common GVfs components with:
 
 ```bash
-dotnet run --project tests/Emanager.FileOps.Smoke/Emanager.FileOps.Smoke.csproj -c Release
+sudo dnf install gvfs gvfs-smb gvfs-fuse
 ```
 
-For local installation, publish and create a launcher for your environment; no system-wide package is currently supplied.
+Do not include passwords in network URLs.
 
-## Security
+## Project Structure
 
-Do not commit credentials, tokens, private keys, personal settings or `.env` files. Use environment variables or a local ignored configuration for secrets. GitHub secret scanning is a secondary defense, not a substitute for checking commits before publishing.
+- `src/Emanager.App/` — Linux desktop application
+- `Emanager.sln` — solution file, if present in your checkout
 
 ## License
 
-GNU Affero General Public License v3.0 (AGPL-3.0), consistent with the original project; see [LICENSE.txt](LICENSE.txt).
+See [LICENSE.txt](LICENSE.txt) for the project's license terms.

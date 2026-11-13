@@ -14,12 +14,16 @@ public sealed class TrashView : UserControl
     private readonly TextBlock status = new() { Foreground = MainWindow.TextMuted, TextWrapping = TextWrapping.Wrap };
     private IReadOnlyList<TrashEntry> entries = [];
     private bool busy;
+    private bool reloadPending;
+    private bool operationBusy;
+    private readonly List<Button> actionButtons = [];
 
     public TrashView(MainWindow owner)
     {
         win = owner;
         Margin = new Thickness(24, 17, 24, 20);
         Content = Build();
+        AttachedToVisualTree += (_, _) => Reload();
         Reload();
     }
 
@@ -34,15 +38,19 @@ public sealed class TrashView : UserControl
 
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         Grid.SetRow(actions, 1);
-        actions.Children.Add(Action("↩  Geri Yükle", () => _ = RestoreSelectedAsync()));
-        actions.Children.Add(Action("Kalıcı Sil", () => _ = DeleteSelectedAsync()));
-        actions.Children.Add(Action("Çöp Kutusunu Boşalt", () => _ = EmptyAsync()));
+        actions.Children.Add(Action("↩  Geri Yükle", RestoreSelectedAsync));
+        actions.Children.Add(Action("Kalıcı Sil", DeleteSelectedAsync));
+        actions.Children.Add(Action("Çöp Kutusunu Boşalt", EmptyAsync));
         body.Children.Add(actions);
 
         Grid.SetRow(status, 2);
         body.Children.Add(status);
         list.ItemTemplate = new FuncDataTemplate<TrashEntry>((entry, _) =>
         {
+            // Avalonia may invoke the template with null when a recycled
+            // ListBoxItem is detached after deleting the last trash entry.
+            if (entry is null)
+                return new Border { IsVisible = false };
             var grid = new Grid
             {
                 ColumnDefinitions = new ColumnDefinitions("2*,3*,1.2*,1*")
@@ -75,30 +83,65 @@ public sealed class TrashView : UserControl
         grid.Children.Add(cell);
     }
 
-    private Button Action(string label, Action action)
+    private Button Action(string label, Func<Task> action)
     {
-        var button = win.MakeButton(label, action);
+        var button = win.MakeButton(label, () => _ = RunOperationAsync(action));
         button.Background = MainWindow.SurfaceBrush;
+        actionButtons.Add(button);
         return button;
+    }
+
+    private async Task RunOperationAsync(Func<Task> action)
+    {
+        if (operationBusy) return;
+        operationBusy = true;
+        foreach (var button in actionButtons) button.IsEnabled = false;
+        TrashDiagnostics.Event("operation-start");
+        try { await action(); }
+        catch (Exception ex)
+        {
+            TrashDiagnostics.Event("operation-exception", exception: ex);
+            await MessageDialog.ShowAsync(this, "Çöp kutusu işlemi başarısız", ex.Message);
+        }
+        finally
+        {
+            foreach (var button in actionButtons) button.IsEnabled = true;
+            operationBusy = false;
+            TrashDiagnostics.Event("operation-finished");
+        }
     }
 
     public void Reload() => _ = ReloadAsync();
 
     private async Task ReloadAsync()
     {
+        // A refresh requested during an earlier refresh must not be lost.
+        // Otherwise a completed delete can leave stale entries visible.
+        reloadPending = true;
         if (busy) return;
         busy = true;
         try
         {
-            entries = await Task.Run(TrashService.ListAll);
-            list.ItemsSource = entries;
-            status.Text = entries.Count == 0
-                ? "Çöp kutusu boş. Silinen dosyalar burada görünecek."
-                : $"{entries.Count} öğe · Ad · Özgün konum · Silinme tarihi · Boyut";
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            status.Text = "Çöp kutusu okunamadı: " + ex.Message;
+            do
+            {
+                reloadPending = false;
+                try
+                {
+                    TrashDiagnostics.Event("reload-start");
+                    var updated = await Task.Run(TrashService.ListAll);
+                    entries = updated;
+                    list.ItemsSource = updated;
+                    status.Text = updated.Count == 0
+                        ? "Çöp kutusu boş. Silinen dosyalar burada görünecek."
+                        : $"{updated.Count} öğe · Ad · Özgün konum · Silinme tarihi · Boyut";
+                    TrashDiagnostics.Event("reload-finished", $"count={updated.Count}");
+                }
+                catch (Exception ex)
+                {
+                    TrashDiagnostics.Event("reload-exception", exception: ex);
+                    status.Text = "Çöp kutusu okunamadı: " + ex.Message;
+                }
+            } while (reloadPending);
         }
         finally { busy = false; }
     }
@@ -136,29 +179,62 @@ public sealed class TrashView : UserControl
     private async Task DeleteSelectedAsync()
     {
         var selected = Selected();
-        if (selected.Count == 0) return;
+        TrashDiagnostics.Event("delete-click", $"selected={selected.Count}");
+        if (selected.Count == 0) { status.Text = "Kalıcı silmek için en az bir öğe seçin."; return; }
+        TrashDiagnostics.Event("confirm-open", $"operation=delete count={selected.Count}");
         if (!await ConfirmDialog.ShowAsync(this, "Kalıcı sil",
-            $"{selected.Count} öğe kalıcı olarak silinecek. Bu işlem geri alınamaz.", "Kalıcı Sil", dangerous: true)) return;
-        try
+            $"{selected.Count} öğe kalıcı olarak silinecek. Bu işlem geri alınamaz.", "Kalıcı Sil", dangerous: true))
         {
-            foreach (var entry in selected) TrashService.PermanentlyDelete(entry);
-            Reload();
+            TrashDiagnostics.Event("confirm-result", "operation=delete accepted=false");
+            return;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        { await MessageDialog.ShowAsync(this, "Kalıcı silme başarısız", ex.Message); }
+        TrashDiagnostics.Event("confirm-result", "operation=delete accepted=true");
+        var result = await Task.Run(() => TrashService.DeleteEntries(selected));
+        TrashDiagnostics.Event("delete-result", $"found={selected.Count} deleted={result.DeletedCount} failed={result.Failures.Count}");
+        await ReloadAsync();
+        if (result.Failures.Count > 0)
+        {
+            var details = string.Join("\n", result.Failures.Select(x => $"{x.Name}: {x.Message}"));
+            await MessageDialog.ShowAsync(this, "Kalıcı silme kısmen başarısız",
+                $"{result.DeletedCount} öğe silindi; {result.Failures.Count} öğe silinemedi:\n{details}");
+        }
     }
 
     private async Task EmptyAsync()
     {
-        if (entries.Count == 0) return;
+        // Refresh before acting: entries shown on screen may already be gone.
+        await ReloadAsync();
+        TrashDiagnostics.Event("empty-click", $"count={entries.Count}");
+        if (entries.Count == 0)
+        {
+            status.Text = "Çöp kutusu boş. Silinecek öğe bulunamadı.";
+            return;
+        }
+        TrashDiagnostics.Event("confirm-open", $"operation=empty count={entries.Count}");
         if (!await ConfirmDialog.ShowAsync(this, "Çöp Kutusunu Boşalt",
-            $"Çöp kutusundaki {entries.Count} öğe kalıcı olarak silinecek. Bu işlem geri alınamaz.", "Çöp Kutusunu Boşalt", dangerous: true)) return;
+            $"Çöp kutusundaki {entries.Count} öğe kalıcı olarak silinecek. Bu işlem geri alınamaz.", "Çöp Kutusunu Boşalt", dangerous: true))
+        {
+            TrashDiagnostics.Event("confirm-result", "operation=empty accepted=false");
+            return;
+        }
+        TrashDiagnostics.Event("confirm-result", "operation=empty accepted=true");
         try
         {
-            await Task.Run(TrashService.EmptyAll);
-            Reload();
+            var result = await Task.Run(TrashService.EmptyAll);
+            TrashDiagnostics.Event("empty-result", $"found={entries.Count} deleted={result.DeletedCount} failed={result.Failures.Count}");
+            if (result.Failures.Count > 0)
+            {
+                var details = string.Join("\n", result.Failures.Select(x => $"{x.Name}: {x.Message}"));
+                await MessageDialog.ShowAsync(this, "Çöp kutusu kısmen boşaltıldı",
+                    $"{result.DeletedCount} öğe silindi; {result.Failures.Count} öğe silinemedi:\n{details}");
+            }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        { await MessageDialog.ShowAsync(this, "Çöp kutusu boşaltılamadı", ex.Message); }
+        catch (Exception ex)
+        { TrashDiagnostics.Event("empty-exception", exception: ex); throw; }
+        finally
+        {
+            await ReloadAsync();
+            TrashDiagnostics.Event("empty-reload-finished", $"remaining={entries.Count}");
+        }
     }
 }

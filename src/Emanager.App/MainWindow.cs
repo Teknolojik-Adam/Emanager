@@ -68,6 +68,8 @@ public sealed class MainWindow : Window
     private readonly List<FilePane> panes = [];
     private TrashView? trashView;
     private bool trashVisible;
+    private DiskUseView? diskView;
+    private bool diskVisible;
     private FilePane? active;
     private IDisposable? searchSubscription;
     private List<(string Path, ClipboardMode Mode)> clipboardFiles = [];
@@ -303,6 +305,7 @@ public sealed class MainWindow : Window
         nav.Children.Add(networkButton);
         nav.Children.Add(MakeBtn("⌨ Terminal", () => OpenTerminalAt(ActivePane()?.Path ?? HomePath()), "Open a terminal in the current folder"));
         nav.Children.Add(MakeBtn(UiText.T("⌕ Gelişmiş ara"), () => _ = ShowAdvancedSearchAsync(), "İndekssiz alt klasör araması"));
+        nav.Children.Add(MakeBtn("▦ Disk", OpenDiskUseForActive, "Bu klasörün disk kullanımını ölç"));
         rootModeButton = MakeBtn("🔒 Root kullanıcı",
             () => _ = ToggleRootModeAsync(), "Polkit ile yönetici dosya bağlantısı aç/kapat");
         nav.Children.Add(rootModeButton);
@@ -473,6 +476,7 @@ public sealed class MainWindow : Window
     private async Task NewTabAsync(string path)
     {
         trashVisible = false;
+        diskVisible = false;
         var left = CreatePane();
         tabs.Add((left, null));
         ActiveTabIndex = tabs.Count - 1;
@@ -486,6 +490,7 @@ public sealed class MainWindow : Window
     {
         if (index < 0 || index >= tabs.Count || (index == ActiveTabIndex && active == tabs[index].Left)) return;
         trashVisible = false;
+        diskVisible = false;
         ActiveTabIndex = index;
         var (left, right) = tabs[index];
         active = right ?? left;
@@ -539,6 +544,7 @@ public sealed class MainWindow : Window
     {
         if (!panes.Contains(pane)) return;
         trashVisible = false;
+        diskVisible = false;
         active = pane;
         pathBox.Text = pane.Path;
     }
@@ -563,6 +569,14 @@ public sealed class MainWindow : Window
             trashView ??= new TrashView(this);
             Grid.SetColumn(trashView, 0);
             paneArea.Children.Add(trashView);
+            return;
+        }
+        if (diskVisible)
+        {
+            paneArea.ColumnDefinitions = new ColumnDefinitions("*");
+            diskView ??= new DiskUseView(this);
+            Grid.SetColumn(diskView, 0);
+            paneArea.Children.Add(diskView);
             return;
         }
         if (ActiveTabIndex >= tabs.Count) return;
@@ -957,6 +971,7 @@ public sealed class MainWindow : Window
     private void ShowTrash()
     {
         trashVisible = true;
+        diskVisible = false;
         trashView ??= new TrashView(this);
         trashView.Reload();
         RebuildPaneArea();
@@ -965,13 +980,38 @@ public sealed class MainWindow : Window
 
     private void ShowPaneArea()
     {
-        if (!trashVisible) return;
+        if (!trashVisible && !diskVisible) return;
         trashVisible = false;
+        diskVisible = false;
         RebuildPaneArea();
         RenderSidebar();
     }
 
     internal void RefreshTrashView() => trashView?.Reload();
+
+    private void OpenDiskUseForActive() => ShowDiskUse(ActivePane()?.Path ?? HomePath());
+
+    /// <summary>Switches the pane area to the disk-usage analyzer and rescans.</summary>
+    internal void ShowDiskUse(string path)
+    {
+        trashVisible = false;
+        diskVisible = true;
+        diskView ??= new DiskUseView(this);
+        RebuildPaneArea();
+        RenderSidebar();
+        diskView.StartScan(path);
+    }
+
+    internal void ShowFileBrowser()
+    {
+        if (!trashVisible && !diskVisible) return;
+        trashVisible = false;
+        diskVisible = false;
+        RebuildPaneArea();
+        RenderSidebar();
+    }
+
+    internal FilePane? ActivePaneForDiskUse() => active ?? panes.FirstOrDefault();
 
     private async Task DisconnectNetworkAsync(string path)
     {

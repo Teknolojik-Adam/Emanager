@@ -20,7 +20,25 @@ internal static class Program
             Environment.ExitCode = 1;
             return;
         }
-        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        // A sandbox, SSH session or background runner may have no graphical session.
+        // Avalonia otherwise throws XOpenDisplay failed and .NET aborts (SIGABRT).
+        if (OperatingSystem.IsLinux() &&
+            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY")) &&
+            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
+        {
+            Console.Error.WriteLine("Emanager: Grafik oturumu bulunamadı (DISPLAY/WAYLAND_DISPLAY). GNOME uygulama listesinden açın.");
+            Environment.ExitCode = 2;
+            return;
+        }
+        try
+        {
+            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Emanager başlatılamadı: {ex.GetType().Name}: {ex.Message}");
+            Environment.ExitCode = 1;
+        }
     }
     public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<EmanagerApplication>().UsePlatformDetect().LogToTrace();
     public static void SetTheme(bool dark) => EmanagerApplication.SetTheme(dark);
@@ -45,6 +63,11 @@ public sealed class EmanagerApplication : Application
         dispatcher.UnhandledException += OnDispatcherUnhandled;
         AppDomain.CurrentDomain.UnhandledException -= OnDomainUnhandled;
         AppDomain.CurrentDomain.UnhandledException += OnDomainUnhandled;
+        // A faulted task nobody awaited used to terminate the process with
+        // SIGABRT (fail-fast). Log it and mark it observed instead; the UI keeps
+        // serving the user and the failure stays diagnosable in crash.log.
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException -= OnUnobservedTask;
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += OnUnobservedTask;
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
             desktop.MainWindow = new MainWindow();
         base.OnFrameworkInitializationCompleted();
@@ -58,10 +81,46 @@ public sealed class EmanagerApplication : Application
     }
     private static void OnDomainUnhandled(object? sender, UnhandledExceptionEventArgs e)
         => Report("DOMAIN", e.ExceptionObject as Exception);
+    private static void OnUnobservedTask(object? sender, System.Threading.Tasks.UnobservedTaskExceptionEventArgs e)
+    {
+        Report("TASK", e.Exception);
+        e.SetObserved();
+    }
+    private static string Sanitize(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return "";
+        var text = message.Replace('\r', ' ').Replace('\n', ' ');
+        var home = UserFolders.Home;
+        if (!string.IsNullOrEmpty(home)) text = text.Replace(home, "~", StringComparison.Ordinal);
+        return text.Length > 160 ? text[..160] + "…" : text;
+    }
+    private static string Describe(Exception? ex)
+    {
+        // AggregateException hides the real fault from callers; unwrap chains.
+        var parts = new List<string>();
+        while (ex is not null)
+        {
+            if (ex is AggregateException agg && agg.InnerExceptions.Count > 0)
+            {
+                parts.Add(agg.GetType().Name);
+                ex = agg.InnerException;
+                continue;
+            }
+            parts.Add(ex.GetType().FullName + ": " + Sanitize(ex.Message));
+            ex = ex.InnerException;
+        }
+        return string.Join(" <- ", parts);
+    }
     private static void Report(string stage, Exception? ex)
     {
-        // Avoid dumping raw file paths, stack traces or credentials to crash logs.
-        var line = $"[{DateTime.UtcNow:O}] {stage}: {ex?.GetType().FullName ?? "Unknown"}\n";
+        // Type + frames give the diagnosis; the message is sanitized because it
+        // can embed user paths. Credentials never reach this text (they are not
+        // part of exception messages thrown by this code base).
+        // AggregateException carries no stack of its own; log the deepest frames.
+        Exception? frameSource = ex;
+        while (frameSource?.InnerException is { } inner) frameSource = inner;
+        var line = $"[{DateTime.UtcNow:O}] {stage}: {Describe(ex)}" +
+                   (frameSource is null ? "" : $" frames={TrashDiagnostics.Frames(frameSource)}") + "\n";
         Console.Error.Write(line);
         try
         {

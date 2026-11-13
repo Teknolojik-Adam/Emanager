@@ -424,10 +424,30 @@ public sealed class FilePane : UserControl
         menu.Items.Add(Make("Özellikler", () => _ = ShowPropertiesAsync()));
         var other = new MenuItem { Header = UiText.T("Diğer işlemler") };
         other.Items.Add(Make("Dosya yolunu kopyala", CopySelectedPathToClipboard));
+        other.Items.Add(Make("İzinler (chmod)…", () => _ = ChmodSelectedAsync()));
+        other.Items.Add(Make("▦  Bu klasörün disk kullanımı", () => win.ShowDiskUse(Path)));
         other.Items.Add(Make("Bu klasörü sabitle", PinCurrent));
         other.Items.Add(Make("Terminali burada aç", OpenTerminal));
         menu.Items.Add(other);
         return menu;
+    }
+
+    public async Task ChmodSelectedAsync()
+    {
+        var paths = SelectedPaths();
+        if (paths.Count == 0) { ReportStatus(UiText.T("İzinlerini değiştirmek için öğe seçin.")); return; }
+        if (KioAdmin.Enabled)
+        {
+            await MessageDialog.ShowAsync(this, UiText.T("İzinler"),
+                UiText.T("Yönetici modunda izin değiştirme desteklenmiyor."));
+            return;
+        }
+        if (await PermissionsDialog.ShowAsync(win, paths))
+        {
+            await RefreshAsync();
+            ReportStatus(UiText.T("İzinler güncellendi."));
+        }
+        list.Focus();
     }
 
     public async Task<NavigationResult> NavigateAsync(string path, bool record = true, int historyDelta = 0, bool resolveRelative = false)
@@ -866,7 +886,7 @@ public sealed class FilePane : UserControl
             foreach (var entry in items.Where(e => e.IsDirectory && !e.IsLink))
             {
                 token.ThrowIfCancellationRequested();
-                long? size = await Task.Run(() => MeasureFolder(entry.FullPath, token), token);
+                long? size = await Task.Run(() => FolderMeasure.Measure(entry.FullPath, token), token);
                 if (version != generation || token.IsCancellationRequested) return;
                 folderSizes[entry.FullPath] = size;
                 // Re-render the visible list without re-reading the filesystem.
@@ -874,39 +894,6 @@ public sealed class FilePane : UserControl
             }
         }
         catch (OperationCanceledException) { }
-    }
-
-    private static long? MeasureFolder(string root, CancellationToken token)
-    {
-        long total = 0;
-        int visited = 0;
-        var pending = new Stack<string>();
-        pending.Push(root);
-        try
-        {
-            while (pending.Count > 0)
-            {
-                token.ThrowIfCancellationRequested();
-                foreach (var path in Directory.EnumerateFileSystemEntries(pending.Pop()))
-                {
-                    token.ThrowIfCancellationRequested();
-                    if (++visited > 100_000) return null; // prevent unbounded scans
-                    try
-                    {
-                        var attr = File.GetAttributes(path);
-                        if ((attr & FileAttributes.ReparsePoint) != 0) continue;
-                        if ((attr & FileAttributes.Directory) != 0) pending.Push(path);
-                        else total = checked(total + new FileInfo(path).Length);
-                    }
-                    catch (IOException) { }
-                    catch (UnauthorizedAccessException) { }
-                }
-            }
-            return total;
-        }
-        catch (IOException) { return null; }
-        catch (UnauthorizedAccessException) { return null; }
-        catch (OverflowException) { return null; }
     }
 
     private void RebuildList()
@@ -969,7 +956,7 @@ public sealed class FilePane : UserControl
             try
             {
                 if (new FileInfo(path).Length <= 80 * 1024 * 1024)
-                    using (var stream = File.OpenRead(path)) decoded = Bitmap.DecodeToWidth(stream, 160);
+                    using (var stream = File.OpenRead(path)) decoded = ImageDecode.TryDecodeToWidth(stream, 160);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or TimeoutException or OperationCanceledException) { }
             Dispatcher.UIThread.Post(() =>
@@ -1023,7 +1010,7 @@ public sealed class FilePane : UserControl
                 try
                 {
                     if (new FileInfo(file).Length <= 80 * 1024 * 1024)
-                        using (var stream = File.OpenRead(file)) image = Bitmap.DecodeToWidth(stream, 600);
+                        using (var stream = File.OpenRead(file)) image = ImageDecode.TryDecodeToWidth(stream, 600);
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or TimeoutException or OperationCanceledException) { }
                 Dispatcher.UIThread.Post(() =>
@@ -1142,7 +1129,9 @@ public sealed class FilePane : UserControl
 /// <summary>Simple modal used for properties, notices and confirmations.</summary>
 public static class MessageDialog
 {
-    private static Window? OwnerWindow(Control owner) => owner as Window ?? owner.GetVisualAncestors().OfType<Window>().FirstOrDefault();
+    private static Window? OwnerWindow(Control owner) => owner as Window
+        ?? TopLevel.GetTopLevel(owner) as Window
+        ?? owner.GetVisualAncestors().OfType<Window>().FirstOrDefault();
 
     public static async Task ShowAsync(Control owner, string title, string message)
     {
@@ -1299,5 +1288,7 @@ public static class InputDialog
         return result;
     }
 
-    private static Window? OwnerWindow(Control owner) => owner as Window ?? owner.GetVisualAncestors().OfType<Window>().FirstOrDefault();
+    private static Window? OwnerWindow(Control owner) => owner as Window
+        ?? TopLevel.GetTopLevel(owner) as Window
+        ?? owner.GetVisualAncestors().OfType<Window>().FirstOrDefault();
 }

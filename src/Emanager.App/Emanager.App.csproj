@@ -5,10 +5,19 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Emanager.App</AssemblyName>
+    <!-- 11.2.7 shipped libHarfBuzzSharp 7.3.0.3 with a 2 MiB-aligned segment
+         layout whose .got.plt template stays file-backed in the r-x mapping;
+         both SIGSEGV core dumps showed execution jumping to the unrelocated
+         template value from hb_buffer_create's calloc PLT slot. 11.3.12 pulls
+         HarfBuzzSharp 8.3.1.1 which uses a conventional 4 KiB layout. -->
+    <!-- CS0618: Avalonia 11.3 obsoletes DataObject/DoDragDrop in favour of
+         DataTransfer; the drag-drop implementation stays on the still
+         functional legacy API until a dedicated migration. -->
+    <NoWarn>$(NoWarn);CS0618</NoWarn>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Avalonia" Version="11.2.7" />
-    <PackageReference Include="Avalonia.Desktop" Version="11.2.7" />
-    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.2.7" />
+    <PackageReference Include="Avalonia" Version="11.3.12" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.12" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.12" />
   </ItemGroup>
 </Project>

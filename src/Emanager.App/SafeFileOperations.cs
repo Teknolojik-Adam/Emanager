@@ -464,13 +464,43 @@ public static class SafeFileOperations
             if (root is null) return null;
             var uid = CurrentUid();
             var candidate = Path.Combine(root, $".Trash-{uid}");
-            var attrs = File.GetAttributes(candidate);
-            if (!attrs.HasFlag(FileAttributes.Directory) || attrs.HasFlag(FileAttributes.ReparsePoint)) return null;
-            var mode = File.GetUnixFileMode(candidate);
-            // Freedesktop .Trash-<uid> is a PRIVATE user-owned directory;
-            // sticky/world-writable rules apply to the shared .Trash instead.
+            if (IsOwnedPrivateTrash(candidate, uid)) return candidate;
+
+            // Freedesktop also permits a shared, sticky volume trash at
+            // .Trash/<uid>. The shared directory itself must be 01777; the
+            // per-user directory remains private and user-owned.
+            var shared = Path.Combine(root, ".Trash");
+            try
+            {
+                var attrs = File.GetAttributes(shared);
+                if (!attrs.HasFlag(FileAttributes.Directory) || attrs.HasFlag(FileAttributes.ReparsePoint)) return null;
+                var mode = File.GetUnixFileMode(shared);
+                if ((mode & (UnixFileMode.OtherWrite | UnixFileMode.OtherExecute | UnixFileMode.StickyBit)) !=
+                    (UnixFileMode.OtherWrite | UnixFileMode.OtherExecute | UnixFileMode.StickyBit)) return null;
+                var userTrash = Path.Combine(shared, uid);
+                return IsOwnedPrivateTrash(userTrash, uid) ? userTrash : null;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                return null;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private static bool IsOwnedPrivateTrash(string path, string uid)
+    {
+        if (!OperatingSystem.IsLinux()) return false;
+        try
+        {
+            var attrs = File.GetAttributes(path);
+            if (!attrs.HasFlag(FileAttributes.Directory) || attrs.HasFlag(FileAttributes.ReparsePoint)) return false;
+            var mode = File.GetUnixFileMode(path);
             if ((mode & (UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute |
-                         UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0) return null;
+                         UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute)) != 0) return false;
             using var process = new System.Diagnostics.Process();
             process.StartInfo = new System.Diagnostics.ProcessStartInfo("/usr/bin/stat")
             {
@@ -480,16 +510,15 @@ public static class SafeFileOperations
             process.StartInfo.ArgumentList.Add("-c");
             process.StartInfo.ArgumentList.Add("%u");
             process.StartInfo.ArgumentList.Add("--");
-            process.StartInfo.ArgumentList.Add(candidate);
-            process.Start();
+            process.StartInfo.ArgumentList.Add(path);
+            if (!process.Start()) return false;
             var owner = process.StandardOutput.ReadToEnd().Trim();
-            if (!process.WaitForExit(2000)) { process.Kill(); return null; }
-            if (process.ExitCode != 0 || owner != uid) return null;
-            return candidate;
+            if (!process.WaitForExit(2000)) { process.Kill(); return false; }
+            return process.ExitCode == 0 && owner == uid;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.ComponentModel.Win32Exception)
         {
-            return null;
+            return false;
         }
     }
 

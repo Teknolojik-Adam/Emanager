@@ -1,17 +1,43 @@
+# Emanager Linux V0.6
+
+# Build output
 **/bin/
 **/obj/
+artifacts/
+publish/
+
+# IDE and editor files
 .vs/
 .idea/
+.vscode/
 *.user
-*.log
-.local-backups/
+*.suo
+*.swp
+*~
+
+# Local configuration
 .env
 .env.*
 !.env.example
 **/settings.json
 **/appsettings.*.local.json
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.bak
+*.before-*
+.local-backups/
+backups-*/
+validation-results/
+
+# Private keys and certificates
 *.pem
 *.p12
 *.pfx
 *.key
-validation-results/
+
+# System files
+.DS_Store
+Thumbs.db

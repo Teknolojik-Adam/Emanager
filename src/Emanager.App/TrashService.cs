@@ -12,6 +12,10 @@ internal sealed record TrashEntry(
     string InfoPath,
     string TrashRoot);
 
+internal sealed record TrashDeleteFailure(string Name, string Path, string Message);
+
+internal sealed record TrashEmptyResult(int DeletedCount, IReadOnlyList<TrashDeleteFailure> Failures);
+
 /// <summary>Freedesktop Trash metadata and lifecycle operations.</summary>
 internal static class TrashService
 {
@@ -22,10 +26,15 @@ internal static class TrashService
         {
             foreach (var volume in FileSystem.Volumes())
                 if (!string.IsNullOrWhiteSpace(volume.MountPoint))
-                    roots.Add(Path.Combine(volume.MountPoint, $".Trash-{CurrentUid()}"));
+                    roots.AddRange(VolumeTrashRoots(volume.MountPoint, CurrentUid()));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
+        return ListAll(roots);
+    }
+
+    internal static IReadOnlyList<TrashEntry> ListAll(IEnumerable<string> roots)
+    {
         return roots.Distinct(StringComparer.Ordinal)
             .SelectMany(List)
             .GroupBy(x => x.TrashPath, StringComparer.Ordinal)
@@ -41,14 +50,15 @@ internal static class TrashService
         var root = Path.GetFullPath(trashRoot);
         var files = Path.Combine(root, "files");
         var info = Path.Combine(root, "info");
-        if (!Directory.Exists(files) || !Directory.Exists(info)) return [];
+        if (IsLink(root) || IsLink(files) || IsLink(info) ||
+            !Directory.Exists(files) || !Directory.Exists(info)) return [];
         var result = new List<TrashEntry>();
         foreach (var item in Directory.EnumerateFileSystemEntries(files))
         {
             var name = Path.GetFileName(item);
             if (string.IsNullOrEmpty(name)) continue;
             var infoPath = Path.Combine(info, name + ".trashinfo");
-            var metadata = ReadInfo(infoPath);
+            var metadata = IsLink(infoPath) ? (null, null) : ReadInfo(infoPath);
             result.Add(new TrashEntry(name, metadata.OriginalPath ?? "", metadata.DeletedAt,
                 Measure(item), IsDirectory(item), item, infoPath, root));
         }
@@ -83,22 +93,54 @@ internal static class TrashService
         TryDeleteInfo(entry.InfoPath);
     }
 
-    public static int Empty(string trashRoot)
+    internal static TrashEmptyResult DeleteEntries(IEnumerable<TrashEntry> entries)
+        => EmptyEntries(entries);
+
+    public static TrashEmptyResult Empty(string trashRoot)
     {
         var entries = List(trashRoot);
-        foreach (var entry in entries) PermanentlyDelete(entry);
-        return entries.Count;
+        return EmptyEntries(entries);
     }
 
-    public static int EmptyAll()
+    public static TrashEmptyResult EmptyAll()
+    {
+        return EmptyEntries(ListAll());
+    }
+
+    internal static TrashEmptyResult EmptyAll(IEnumerable<string> roots)
+    {
+        return EmptyEntries(ListAll(roots));
+    }
+
+    internal static IReadOnlyList<string> VolumeTrashRoots(string mountPoint, string uid)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(mountPoint);
+        ArgumentException.ThrowIfNullOrWhiteSpace(uid);
+        var root = Path.GetFullPath(mountPoint);
+        return
+        [
+            Path.Combine(root, $".Trash-{uid}"),
+            Path.Combine(root, ".Trash", uid)
+        ];
+    }
+
+    private static TrashEmptyResult EmptyEntries(IEnumerable<TrashEntry> entries)
     {
         var count = 0;
-        foreach (var entry in ListAll())
+        var failures = new List<TrashDeleteFailure>();
+        foreach (var entry in entries)
         {
-            PermanentlyDelete(entry);
-            count++;
+            try
+            {
+                PermanentlyDelete(entry);
+                count++;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                failures.Add(new TrashDeleteFailure(entry.Name, entry.TrashPath, ex.Message));
+            }
         }
-        return count;
+        return new TrashEmptyResult(count, failures);
     }
 
     internal static string HomeTrashRoot() => Path.Combine(UserFolders.Home, ".local", "share", "Trash");
@@ -175,15 +217,10 @@ internal static class TrashService
     private static void DeleteEntry(string path)
     {
         if (IsLink(path) || File.Exists(path)) { File.Delete(path); return; }
-        if (!Directory.Exists(path)) return;
+        if (!Directory.Exists(path)) throw new FileNotFoundException("Çöp kutusu girdisi bulunamadı.");
         foreach (var child in Directory.EnumerateFileSystemEntries(path)) DeleteEntry(child);
         Directory.Delete(path);
     }
 
-    private static void TryDeleteInfo(string path)
-    {
-        try { File.Delete(path); }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
-    }
+    private static void TryDeleteInfo(string path) => File.Delete(path);
 }
