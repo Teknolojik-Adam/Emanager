@@ -307,6 +307,51 @@ public static class SafeFileOperations
         RenameNoReplaceNative(-100, source, -100, destination, 1);
 
     /// <summary>Renames inside the containing directory; never overwrites.</summary>
+    /// <summary>
+    /// Replaces an existing destination only after moving it to a private backup.
+    /// If the safe copy/move fails or is cancelled, the original destination is restored.
+    /// </summary>
+    public static async Task ReplaceAsync(string source, string destinationDirectory, bool move,
+        CancellationToken ct = default, Action<long>? progress = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(source);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationDirectory);
+        var input = Path.GetFullPath(source);
+        var directory = Path.GetFullPath(destinationDirectory);
+        RejectLinkedAncestors(input);
+        RejectLinkedAncestors(directory);
+        if (!Directory.Exists(directory)) throw new DirectoryNotFoundException(directory);
+        var destination = Path.Combine(directory, Path.GetFileName(input));
+        if (string.Equals(input, destination, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            throw new IOException("Source and destination are identical.");
+        if (!File.Exists(destination) && !Directory.Exists(destination) && !IsLink(destination))
+        {
+            if (move) await MoveAsync(input, directory, ct, progress); else await CopyAsync(input, directory, ct, progress);
+            return;
+        }
+        if (IsLink(destination)) throw new NotSupportedException("Replacing symbolic-link destinations is blocked.");
+        var backup = Path.Combine(directory, ".emanager-conflict-backup-" + Guid.NewGuid().ToString("N"));
+        if (Directory.Exists(destination)) Directory.Move(destination, backup); else File.Move(destination, backup);
+        try
+        {
+            if (move) await MoveAsync(input, directory, ct, progress); else await CopyAsync(input, directory, ct, progress);
+            DeleteRecursive(backup);
+        }
+        catch
+        {
+            try
+            {
+                if (!File.Exists(destination) && !Directory.Exists(destination) && !IsLink(destination))
+                {
+                    if (Directory.Exists(backup)) Directory.Move(backup, destination); else File.Move(backup, destination);
+                }
+            }
+            catch { }
+            throw;
+        }
+        finally { TryCleanupStagingDirectory(backup); }
+    }
+
     public static Task RenameAsync(string source, string newName, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(source);

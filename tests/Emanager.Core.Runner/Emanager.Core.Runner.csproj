@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <Reference Include="xunit.runner.utility"><HintPath>../Emanager.Core.Tests/bin/Release/net8.0/xunit.runner.utility.netcoreapp10.dll</HintPath></Reference>
+    <Reference Include="xunit.execution"><HintPath>../Emanager.Core.Tests/bin/Release/net8.0/xunit.execution.dotnet.dll</HintPath></Reference>
+    <Reference Include="xunit.abstractions"><HintPath>../Emanager.Core.Tests/bin/Release/net8.0/xunit.abstractions.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>

@@ -239,7 +239,7 @@ internal static class OpenWithDialog
                 saveDefault.IsEnabled = choices.MimeType != "application/octet-stream";
                 if (!saveDefault.IsEnabled)
                     saveDefault.Content = UiText.T("Bilinmeyen dosya türü için varsayılan atama yapılamaz");
-                selectedInfo.Text = $"{allApps.Count} uygulama bulundu. Önerilen programlardan birini seçin.";
+                selectedInfo.Text = UiText.F("{0} uygulama bulundu. Önerilen programlardan birini seçin.", allApps.Count);
             }
             catch (OperationCanceledException) { return; }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or TimeoutException or ArgumentException)

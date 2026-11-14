@@ -15,7 +15,7 @@ public static class NetworkLocations
         if (value is null || value.Split('/').Any(part =>
             Uri.UnescapeDataString(part.Split('?', '#')[0]) is "." or "..")) return false;
         if (!Uri.TryCreate(value?.Trim(), UriKind.Absolute, out var uri) ||
-            (uri.Scheme != "smb" && uri.Scheme != "sftp") ||
+            (uri.Scheme != "smb" && uri.Scheme != "sftp" && uri.Scheme != "ftp" && uri.Scheme != "ftps" && uri.Scheme != "dav" && uri.Scheme != "davs") ||
             string.IsNullOrWhiteSpace(uri.Host) ||
             !string.IsNullOrEmpty(uri.UserInfo) && Uri.UnescapeDataString(uri.UserInfo).Contains(':') ||
             !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
@@ -54,10 +54,15 @@ public static class NetworkLocations
             {
                 var name = Path.GetFileName(folder);
                 if (!name.StartsWith("smb-share:", StringComparison.Ordinal) &&
-                    !name.StartsWith("sftp:", StringComparison.Ordinal)) continue;
+                    !name.StartsWith("sftp:", StringComparison.Ordinal) &&
+                    !name.StartsWith("ftp:", StringComparison.Ordinal) &&
+                    !name.StartsWith("dav:", StringComparison.Ordinal) &&
+                    !name.StartsWith("davs:", StringComparison.Ordinal)) continue;
                 items.Add((name.StartsWith("sftp:", StringComparison.Ordinal)
                     ? "SFTP · " + Attribute(name, "host")
-                    : "SMB · " + Attribute(name, "share") + " @ " + Attribute(name, "server"), folder));
+                    : name.StartsWith("smb-share:", StringComparison.Ordinal)
+                        ? "SMB · " + Attribute(name, "share") + " @ " + Attribute(name, "server")
+                        : name[..name.IndexOf(':')] + " · " + Attribute(name, "host"), folder));
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
@@ -86,7 +91,9 @@ public static class NetworkLocations
             var name = Path.GetFileName(path);
             if (uri.Scheme == "smb" && !name.StartsWith("smb-share:", StringComparison.Ordinal)) continue;
             if (uri.Scheme == "sftp" && !name.StartsWith("sftp:", StringComparison.Ordinal)) continue;
+            if (uri.Scheme is "ftp" or "ftps" or "dav" or "davs" && !name.StartsWith(uri.Scheme + ":", StringComparison.Ordinal)) continue;
             var host = Attribute(name, uri.Scheme == "smb" ? "server" : "host");
+            if (string.IsNullOrWhiteSpace(host) && uri.Scheme is not "smb" and not "sftp") host = name;
             if (!host.Equals(uri.Host, StringComparison.OrdinalIgnoreCase)) continue;
             if (uri.Scheme == "smb" &&
                 !Attribute(name, "share").Equals(Uri.UnescapeDataString(uri.AbsolutePath.Trim('/').Split('/')[0]), StringComparison.OrdinalIgnoreCase))

@@ -32,15 +32,15 @@ public sealed class TrashView : UserControl
         var body = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*") };
         body.Children.Add(new TextBlock
         {
-            Text = "🗑️  Çöp Kutusu", FontSize = 30, FontWeight = FontWeight.Bold,
+            Text = UiText.T("🗑️  Çöp Kutusu"), FontSize = 30, FontWeight = FontWeight.Bold,
             Foreground = MainWindow.TextPrimary
         });
 
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         Grid.SetRow(actions, 1);
-        actions.Children.Add(Action("↩  Geri Yükle", RestoreSelectedAsync));
-        actions.Children.Add(Action("Kalıcı Sil", DeleteSelectedAsync));
-        actions.Children.Add(Action("Çöp Kutusunu Boşalt", EmptyAsync));
+        actions.Children.Add(Action(UiText.T("↩  Geri Yükle"), RestoreSelectedAsync));
+        actions.Children.Add(Action(UiText.T("Kalıcı Sil"), DeleteSelectedAsync));
+        actions.Children.Add(Action(UiText.T("Çöp Kutusunu Boşalt"), EmptyAsync));
         body.Children.Add(actions);
 
         Grid.SetRow(status, 2);
@@ -56,7 +56,7 @@ public sealed class TrashView : UserControl
                 ColumnDefinitions = new ColumnDefinitions("2*,3*,1.2*,1*")
             };
             AddCell(grid, entry.Name, 0, MainWindow.TextPrimary);
-            AddCell(grid, string.IsNullOrEmpty(entry.OriginalPath) ? "(özgün konum bilinmiyor)" : entry.OriginalPath,
+            AddCell(grid, string.IsNullOrEmpty(entry.OriginalPath) ? UiText.T("(özgün konum bilinmiyor)") : entry.OriginalPath,
                 1, MainWindow.TextMuted);
             AddCell(grid, entry.DeletedAt?.ToString("g") ?? "—", 2, MainWindow.TextMuted);
             AddCell(grid, FileSystem.HumanSize(entry.Size), 3, MainWindow.TextMuted);
@@ -101,7 +101,7 @@ public sealed class TrashView : UserControl
         catch (Exception ex)
         {
             TrashDiagnostics.Event("operation-exception", exception: ex);
-            await MessageDialog.ShowAsync(this, "Çöp kutusu işlemi başarısız", ex.Message);
+            await MessageDialog.ShowAsync(this, UiText.T("Çöp kutusu işlemi başarısız"), ex.Message);
         }
         finally
         {
@@ -132,14 +132,14 @@ public sealed class TrashView : UserControl
                     entries = updated;
                     list.ItemsSource = updated;
                     status.Text = updated.Count == 0
-                        ? "Çöp kutusu boş. Silinen dosyalar burada görünecek."
-                        : $"{updated.Count} öğe · Ad · Özgün konum · Silinme tarihi · Boyut";
+                        ? UiText.T("Çöp kutusu boş. Silinen dosyalar burada görünecek.")
+                        : UiText.F("{0} öğe · Ad · Özgün konum · Silinme tarihi · Boyut", updated.Count);
                     TrashDiagnostics.Event("reload-finished", $"count={updated.Count}");
                 }
                 catch (Exception ex)
                 {
                     TrashDiagnostics.Event("reload-exception", exception: ex);
-                    status.Text = "Çöp kutusu okunamadı: " + ex.Message;
+                    status.Text = UiText.T("Çöp kutusu okunamadı: ") + ex.Message;
                 }
             } while (reloadPending);
         }
@@ -161,16 +161,16 @@ public sealed class TrashView : UserControl
                 var parent = string.IsNullOrWhiteSpace(entry.OriginalPath) ? null : Directory.GetParent(entry.OriginalPath)?.FullName;
                 if (parent is null || !Directory.Exists(parent))
                 {
-                    alternate = await InputDialog.ShowAsync(this, "Geri yükleme konumu",
+                    alternate = await InputDialog.ShowAsync(this, UiText.T("Geri yükleme konumu"),
                         Path.Combine(MainWindow.HomePath(), entry.Name),
-                        "Özgün klasör bulunamadı. Yeni hedef yolu girin:");
+                        UiText.T("Özgün klasör bulunamadı. Yeni hedef yolu girin:"));
                     if (string.IsNullOrWhiteSpace(alternate)) continue;
                 }
                 TrashService.Restore(entry, alternate);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
             {
-                await MessageDialog.ShowAsync(this, "Geri yükleme başarısız", ex.Message);
+                await MessageDialog.ShowAsync(this, UiText.T("Geri yükleme başarısız"), ex.Message);
             }
         }
         Reload();
@@ -180,10 +180,10 @@ public sealed class TrashView : UserControl
     {
         var selected = Selected();
         TrashDiagnostics.Event("delete-click", $"selected={selected.Count}");
-        if (selected.Count == 0) { status.Text = "Kalıcı silmek için en az bir öğe seçin."; return; }
+        if (selected.Count == 0) { status.Text = UiText.T("Kalıcı silmek için en az bir öğe seçin."); return; }
         TrashDiagnostics.Event("confirm-open", $"operation=delete count={selected.Count}");
-        if (!await ConfirmDialog.ShowAsync(this, "Kalıcı sil",
-            $"{selected.Count} öğe kalıcı olarak silinecek. Bu işlem geri alınamaz.", "Kalıcı Sil", dangerous: true))
+        if (!await ConfirmDialog.ShowAsync(this, UiText.T("Kalıcı sil"),
+            UiText.F("{0} öğe kalıcı olarak silinecek. Bu işlem geri alınamaz.", selected.Count), UiText.T("Kalıcı Sil"), dangerous: true))
         {
             TrashDiagnostics.Event("confirm-result", "operation=delete accepted=false");
             return;
@@ -195,8 +195,8 @@ public sealed class TrashView : UserControl
         if (result.Failures.Count > 0)
         {
             var details = string.Join("\n", result.Failures.Select(x => $"{x.Name}: {x.Message}"));
-            await MessageDialog.ShowAsync(this, "Kalıcı silme kısmen başarısız",
-                $"{result.DeletedCount} öğe silindi; {result.Failures.Count} öğe silinemedi:\n{details}");
+            await MessageDialog.ShowAsync(this, UiText.T("Kalıcı silme kısmen başarısız"),
+                UiText.F("{0} öğe silindi; {1} öğe silinemedi:\n{2}", result.DeletedCount, result.Failures.Count, details));
         }
     }
 
@@ -207,12 +207,12 @@ public sealed class TrashView : UserControl
         TrashDiagnostics.Event("empty-click", $"count={entries.Count}");
         if (entries.Count == 0)
         {
-            status.Text = "Çöp kutusu boş. Silinecek öğe bulunamadı.";
+            status.Text = UiText.T("Çöp kutusu boş. Silinecek öğe bulunamadı.");
             return;
         }
         TrashDiagnostics.Event("confirm-open", $"operation=empty count={entries.Count}");
-        if (!await ConfirmDialog.ShowAsync(this, "Çöp Kutusunu Boşalt",
-            $"Çöp kutusundaki {entries.Count} öğe kalıcı olarak silinecek. Bu işlem geri alınamaz.", "Çöp Kutusunu Boşalt", dangerous: true))
+        if (!await ConfirmDialog.ShowAsync(this, UiText.T("Çöp Kutusunu Boşalt"),
+            UiText.F("Çöp kutusundaki {0} öğe kalıcı olarak silinecek. Bu işlem geri alınamaz.", entries.Count), UiText.T("Çöp Kutusunu Boşalt"), dangerous: true))
         {
             TrashDiagnostics.Event("confirm-result", "operation=empty accepted=false");
             return;
@@ -225,8 +225,8 @@ public sealed class TrashView : UserControl
             if (result.Failures.Count > 0)
             {
                 var details = string.Join("\n", result.Failures.Select(x => $"{x.Name}: {x.Message}"));
-                await MessageDialog.ShowAsync(this, "Çöp kutusu kısmen boşaltıldı",
-                    $"{result.DeletedCount} öğe silindi; {result.Failures.Count} öğe silinemedi:\n{details}");
+                await MessageDialog.ShowAsync(this, UiText.T("Çöp kutusu kısmen boşaltıldı"),
+                    UiText.F("{0} öğe silindi; {1} öğe silinemedi:\n{2}", result.DeletedCount, result.Failures.Count, details));
             }
         }
         catch (Exception ex)

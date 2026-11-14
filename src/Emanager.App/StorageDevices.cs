@@ -129,49 +129,12 @@ public static class StorageDevices
         (value.ValueKind == JsonValueKind.True ||
          (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int n) && n != 0));
 
-    /// <summary>Mount only after the user clicks an explicitly discovered device.</summary>
-    public static async Task<string> MountAsync(string device, CancellationToken token = default)
-    {
-        var volume = FileSystem.Volumes().FirstOrDefault(v => v.Device == device);
-        if (volume is null) throw new IOException(UiText.T("Aygıt artık bağlı değil."));
-        if (volume.IsMounted) return volume.MountPoint;
-
-        using var process = new Process();
-        process.StartInfo = new ProcessStartInfo("/usr/bin/udisksctl")
-        {
-            UseShellExecute = false,
-            RedirectStandardError = true,
-            RedirectStandardOutput = true,
-            CreateNoWindow = true
-        };
-        TrustedTools.SecurePath(process.StartInfo);
-        process.StartInfo.ArgumentList.Add("mount");
-        process.StartInfo.ArgumentList.Add("--block-device");
-        process.StartInfo.ArgumentList.Add(device);
-
-        if (!process.Start()) throw new IOException(UiText.T("udisksctl başlatılamadı."));
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-        timeout.CancelAfter(TimeSpan.FromSeconds(90));
-        try
-        {
-            var stdout = process.StandardOutput.ReadToEndAsync(timeout.Token);
-            var stderr = process.StandardError.ReadToEndAsync(timeout.Token);
-            await process.WaitForExitAsync(timeout.Token);
-            await Task.WhenAll(stdout, stderr);
-            if (process.ExitCode != 0)
-                throw new IOException(UiText.T("Disk bağlanamadı: ") + (await stderr).Trim());
-        }
-        catch (OperationCanceledException)
-        {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
-            throw new TimeoutException(UiText.T("Disk bağlama işlemi zaman aşımına uğradı."));
-        }
-        for (int i = 0; i < 12; i++)
-        {
-            var mounted = FileSystem.Volumes().FirstOrDefault(v => v.Device == device);
-            if (mounted?.IsMounted == true) return mounted.MountPoint;
-            await Task.Delay(250, token);
-        }
-        throw new IOException(UiText.T("Disk bağlandı ancak erişilebilir bağlama noktası bulunamadı."));
-    }
+    /// <summary>
+    /// Legacy entry point retained for source compatibility. Mutating a device
+    /// from a path-only helper would bypass topology and system-disk checks.
+    /// </summary>
+    [Obsolete("Use PolicyEnforcedDiskMountService with a fresh discovery snapshot.")]
+    public static Task<string> MountAsync(string device, CancellationToken token = default) =>
+        Task.FromException<string>(new InvalidOperationException(
+            "Use the policy-enforced disk operation service instead of the legacy path-only mount helper."));
 }

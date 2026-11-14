@@ -15,6 +15,10 @@ public sealed class Preferences
     public string ViewMode { get; set; } = "Detaylar";
     public List<string> Pins { get; set; } = [];
     public List<string> NetworkBookmarks { get; set; } = [];
+    public Dictionary<string, string> Shortcuts { get; set; } = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["copy"] = "Ctrl+C", ["paste"] = "Ctrl+V", ["rename"] = "F2", ["new-tab"] = "Ctrl+T", ["close-tab"] = "Ctrl+W"
+    };
     private static string FilePath => Path.Combine(UserFolders.ConfigDirectory, "settings.json");
     public static Preferences Load()
     {

@@ -34,14 +34,14 @@ internal static class UntrustedLauncher
         var actual = ResolveLocalLink(path);
         if (!Path.GetExtension(actual).Equals(".desktop", StringComparison.OrdinalIgnoreCase) &&
             !Path.GetExtension(path).Equals(".desktop", StringComparison.OrdinalIgnoreCase))
-            return "Çalıştırılabilir dosya veya betik.";
+            return UiText.T("Çalıştırılabilir dosya veya betik.");
         try
         {
             foreach (var line in File.ReadLines(actual).Take(120))
                 if (line.StartsWith("Exec=", StringComparison.Ordinal))
-                    return "Masaüstü başlatıcısı komutu: " + line[5..].Replace('\n', ' ').Replace('\r', ' ')[..Math.Min(240, line.Length - 5)];
+                    return UiText.T("Masaüstü başlatıcısı komutu: ") + line[5..].Replace('\n', ' ').Replace('\r', ' ')[..Math.Min(240, line.Length - 5)];
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-        return "Bu masaüstü başlatıcısı bir komut çalıştırabilir.";
+        return UiText.T("Bu masaüstü başlatıcısı bir komut çalıştırabilir.");
     }
 }

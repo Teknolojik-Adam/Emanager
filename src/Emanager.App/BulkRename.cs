@@ -12,28 +12,28 @@ public static class BulkRename
     public static async Task<bool> ShowAsync(Window owner, IReadOnlyList<string> paths)
     {
         if (paths.Count < 2) return false;
-        var dialog = new Window { Title = "Rename files", Width = 620, Height = 490,
+        var dialog = new Window { Title = UiText.T("Dosyaları yeniden adlandır"), Width = 620, Height = 490,
             MinWidth = 560, MinHeight = 420, WindowStartupLocation = WindowStartupLocation.CenterOwner,
             Background = MainWindow.SidebarBrush };
         var root = new DockPanel { Margin = new Thickness(20), LastChildFill = true };
         var fields = new StackPanel { Spacing = 9 };
         DockPanel.SetDock(fields, Dock.Top);
         root.Children.Add(fields);
-        fields.Children.Add(new TextBlock { Text = $"{paths.Count} files/folders selected", FontSize = 18, FontWeight = FontWeight.SemiBold, Foreground = MainWindow.TextPrimary });
-        fields.Children.Add(new TextBlock { Text = "Enter a name; files are numbered automatically.", Foreground = MainWindow.TextMuted });
-        var simpleName = new TextBox { Watermark = "New name (e.g. Holiday)", Text = "File" };
+        fields.Children.Add(new TextBlock { Text = UiText.F("{0} dosya/klasör seçildi", paths.Count), FontSize = 18, FontWeight = FontWeight.SemiBold, Foreground = MainWindow.TextPrimary });
+        fields.Children.Add(new TextBlock { Text = UiText.T("Bir ad girin; dosyalar otomatik olarak numaralandırılır."), Foreground = MainWindow.TextMuted });
+        var simpleName = new TextBox { Watermark = UiText.T("Yeni ad (ör. Tatil)"), Text = UiText.T("Dosya") };
         fields.Children.Add(simpleName);
-        var advanced = new CheckBox { Content = "Show advanced options" };
+        var advanced = new CheckBox { Content = UiText.T("Gelişmiş seçenekleri göster") };
         fields.Children.Add(advanced);
         var advancedFields = new StackPanel { Spacing = 8, IsVisible = false };
         fields.Children.Add(advancedFields);
-        var find = new TextBox { Watermark = "Find (optional)" };
-        var replace = new TextBox { Watermark = "Replace with" };
-        var prefix = new TextBox { Watermark = "Prefix (optional)" };
-        var suffix = new TextBox { Watermark = "Suffix (before extension)" };
-        var number = new CheckBox { Content = "Add sequence numbers (001, 002, …)" };
-        var preserve = new CheckBox { Content = "Keep file extensions", IsChecked = true };
-        advancedFields.Children.Add(new TextBlock { Text = "Optional customization", Foreground = MainWindow.TextMuted });
+        var find = new TextBox { Watermark = UiText.T("Bul (isteğe bağlı)") };
+        var replace = new TextBox { Watermark = UiText.T("Şununla değiştir") };
+        var prefix = new TextBox { Watermark = UiText.T("Önek (isteğe bağlı)") };
+        var suffix = new TextBox { Watermark = UiText.T("Sonek (uzantıdan önce)") };
+        var number = new CheckBox { Content = UiText.T("Sıra numarası ekle (001, 002, …)") };
+        var preserve = new CheckBox { Content = UiText.T("Dosya uzantılarını koru"), IsChecked = true };
+        advancedFields.Children.Add(new TextBlock { Text = UiText.T("İsteğe bağlı düzenleme"), Foreground = MainWindow.TextMuted });
         advancedFields.Children.Add(find); advancedFields.Children.Add(replace);
         advancedFields.Children.Add(prefix); advancedFields.Children.Add(suffix);
         advancedFields.Children.Add(number); advancedFields.Children.Add(preserve);
@@ -45,8 +45,8 @@ public static class BulkRename
             HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 12, 0, 0) };
         DockPanel.SetDock(footer, Dock.Bottom);
         root.Children.Add(footer);
-        var cancel = new Button { Content = "Cancel", Padding = new Thickness(16, 8) };
-        var apply = new Button { Content = "Rename", Padding = new Thickness(16, 8) };
+        var cancel = new Button { Content = UiText.T("Vazgeç"), Padding = new Thickness(16, 8) };
+        var apply = new Button { Content = UiText.T("Yeniden adlandır"), Padding = new Thickness(16, 8) };
         footer.Children.Add(cancel); footer.Children.Add(apply);
         root.Children.Add(preview);
         dialog.Content = root;
@@ -77,24 +77,24 @@ public static class BulkRename
                 }
                 var target = Path.Combine(Path.GetDirectoryName(path)!, next);
                 if (string.IsNullOrWhiteSpace(next) || next is "." or ".." || next.Contains('/') || next.Contains((char)92) || next.Contains((char)0))
-                    problems.Add("Invalid name: " + next);
-                if (!used.Add(target)) problems.Add("Duplicate target name: " + next);
+                    problems.Add(UiText.T("Geçersiz ad: ") + next);
+                if (!used.Add(target)) problems.Add(UiText.T("Hedef adı tekrarlanıyor: ") + next);
                 if (target != path && !sourceSet.Contains(target) && (File.Exists(target) || Directory.Exists(target)))
-                    problems.Add("Target already exists: " + next);
+                    problems.Add(UiText.T("Hedef zaten var: ") + next);
                 if (target != path) changes.Add(new Change(path, target, directory));
             }
             preview.Text = string.Join("\n", paths.Select(path =>
             {
                 var match = changes.FirstOrDefault(c => c.Source == path);
-                return Path.GetFileName(path) + "  →  " + (match is null ? "(unchanged)" : Path.GetFileName(match.Target));
+                return Path.GetFileName(path) + "  →  " + (match is null ? UiText.T("değişmedi") : Path.GetFileName(match.Target));
             }));
             var moving = changes.Select(c => c.Source).ToHashSet(StringComparer.Ordinal);
             foreach (var change in changes)
                 if (sourceSet.Contains(change.Target) && !moving.Contains(change.Target))
-                    problems.Add("Name belongs to an unchanged file: " + Path.GetFileName(change.Target));
+                    problems.Add(UiText.T("Değişmeden kalan dosyaya ait ad: ") + Path.GetFileName(change.Target));
             valid = problems.Count == 0 && changes.Count > 0;
             apply.IsEnabled = valid;
-            status.Text = problems.Count > 0 ? string.Join(" | ", problems.Take(3)) : $"{changes.Count} names will change.";
+            status.Text = problems.Count > 0 ? string.Join(" | ", problems.Take(3)) : UiText.F("{0} ad değişecek.", changes.Count);
         }
         advanced.IsCheckedChanged += (_, _) => { advancedFields.IsVisible = advanced.IsChecked == true; Update(); };
         simpleName.TextChanged += (_, _) => Update();
@@ -110,7 +110,7 @@ public static class BulkRename
             try { Execute(changes); dialog.Close(true); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                status.Text = "Operation failed: " + ex.Message;
+                status.Text = UiText.T("İşlem başarısız: ") + ex.Message;
                 if (ex.Message.Contains("Kurtarma raporu:", StringComparison.Ordinal))
                 {
                     // Make any hidden .emanager-rename-* leftovers visible.
@@ -120,7 +120,7 @@ public static class BulkRename
                         main.ApplyViewPrefsToAllPanes();
                     }
                     apply.IsEnabled = false;
-                    await MessageDialog.ShowAsync(dialog, "Toplu adlandırma: kurtarma gerekli", ex.Message);
+                    await MessageDialog.ShowAsync(dialog, UiText.T("Toplu adlandırma: kurtarma gerekli"), ex.Message);
                 }
                 else apply.IsEnabled = true;
             }
