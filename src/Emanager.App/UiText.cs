@@ -486,6 +486,23 @@ public static class UiText
         ["Emanager root olarak başlatılamaz. Normal kullanıcı olarak açıp KIO-Admin/Polkit kullanın."] = "Emanager cannot be started as root. Run it as a normal user and use KIO-Admin/Polkit.",
         ["Emanager: Grafik oturumu bulunamadı (DISPLAY/WAYLAND_DISPLAY). GNOME uygulama listesinden açın."] = "Emanager: no graphical session was found (DISPLAY/WAYLAND_DISPLAY). Launch it from the GNOME application list.",
         ["Emanager başlatılamadı: {0}: {1}"] = "Emanager could not start: {0}: {1}",
+        ["Klasörleri eşitle…"] = "Equalize folders…",
+        ["Klasör eşitleme"] = "Folder equalization",
+        ["Eşitlenecek hedef klasör yolu:"] = "Target folder path to equalize:",
+        ["Kaynak ve hedef aynı veya iç içe klasör olamaz."] = "Source and target cannot be the same or nested folders.",
+        ["Kaynak: {0}\nHedef: {1}"] = "Source: {0}\nTarget: {1}",
+        ["Mod:"] = "Mode:",
+        ["Birleştir (silme yok)"] = "Merge (no deletions)",
+        ["Eşitle (fazlalıklar silinir)"] = "Equalize (extras are deleted)",
+        ["Kaynak → Hedef"] = "Source → Target",
+        ["Hedef → Kaynak"] = "Target → Source",
+        ["Planlanıyor…"] = "Planning…",
+        ["Planlanacak işlem yok — klasörler zaten eşit."] = "Nothing to plan — the folders are already equal.",
+        ["Uygulanıyor: {0}"] = "Applying: {0}",
+        ["Dosyalar kopyalanabilir, üzerine yazılabilir veya silinebilir."] = "Files may be copied, overwritten or deleted.",
+        ["Yazılan veya silinen dosyaların yedeği şuraya alınır: {0}"] = "Overwritten or deleted files are backed up to: {0}",
+        ["{0} dosya yedeklendi."] = "{0} files backed up.",
+        ["{0} işlem uygulandı. Yedek klasörü: {1}"] = "{0} operations applied. Backup folder: {1}",
     };
     private static readonly Dictionary<string, string> Turkish =
         English.GroupBy(pair => pair.Value, StringComparer.Ordinal)

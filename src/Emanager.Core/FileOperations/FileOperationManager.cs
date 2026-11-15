@@ -31,11 +31,57 @@ public sealed class FileOperationManager
     public void Cancel(Guid jobId) { if (_running.TryGetValue(jobId, out var value)) value.Cts.Cancel(); }
     public void Pause(Guid jobId) { if (_running.TryGetValue(jobId, out var value)) { value.Pause.Reset(); _journal.Append(new(jobId, value.Job.Kind, value.Job.Source, value.Job.Destination, FileOperationState.Paused, DateTimeOffset.UtcNow)); } }
     public void Resume(Guid jobId) { if (_running.TryGetValue(jobId, out var value)) value.Pause.Set(); }
-    public async Task<IReadOnlyList<FileOperationResult>> ResumeRecoverableAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Retries recoverable operations from the beginning. Transfers do not
+    /// persist a byte offset, and the journal does not retain conflict choices,
+    /// so every existing destination needs a fresh decision from the caller.
+    /// </summary>
+    public Task<IReadOnlyList<FileOperationResult>> RetryRecoverableAsync(CancellationToken cancellationToken = default) =>
+        RetryRecoverableAsync(null, cancellationToken);
+
+    /// <summary>Retries recoverable operations, asking for a fresh decision for each existing target.</summary>
+    public async Task<IReadOnlyList<FileOperationResult>> RetryRecoverableAsync(
+        Func<FileConflict, CancellationToken, Task<ConflictAction?>>? conflictResolver,
+        CancellationToken cancellationToken = default)
     {
-        var jobs = Recoverable.Select(x => new FileOperationJob(x.JobId, x.Kind, x.Source, x.Destination, x.UpdatedAt)).ToArray();
-        return await Task.WhenAll(jobs.Select(job => EnqueueAsync(job, cancellationToken)));
+        var results = new List<FileOperationResult>();
+        foreach (var entry in Recoverable)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var destinationPath = entry.Kind == FileOperationKind.Rename
+                ? entry.Destination
+                : Path.Combine(entry.Destination, Path.GetFileName(entry.Source));
+            var exists = File.Exists(destinationPath) || Directory.Exists(destinationPath);
+            ConflictAction? decision = null;
+            if (exists && conflictResolver is not null)
+            {
+                var sourceInfo = new FileInfo(entry.Source);
+                var destinationInfo = new FileInfo(destinationPath);
+                var conflict = new FileConflict(entry.Source, destinationPath,
+                    sourceInfo.Exists ? sourceInfo.Length : 0,
+                    destinationInfo.Exists ? destinationInfo.Length : 0,
+                    sourceInfo.Exists ? new DateTimeOffset(sourceInfo.LastWriteTimeUtc) : DateTimeOffset.MinValue,
+                    destinationInfo.Exists ? new DateTimeOffset(destinationInfo.LastWriteTimeUtc) : DateTimeOffset.MinValue);
+                decision = await conflictResolver(conflict, cancellationToken);
+                if (decision is null)
+                {
+                    // Cancellation is an answer to this prompt, not a terminal
+                    // journal state. Leave the entry available for a later retry.
+                    results.Add(new(entry.JobId, FileOperationState.Cancelled));
+                    continue;
+                }
+            }
+
+            var job = new FileOperationJob(entry.JobId, entry.Kind, entry.Source, entry.Destination,
+                entry.UpdatedAt, Conflict: decision);
+            results.Add(await EnqueueAsync(job, cancellationToken));
+        }
+        return results;
     }
+
+    /// <summary>Compatibility alias. Recoverable operations are retried from the beginning.</summary>
+    public Task<IReadOnlyList<FileOperationResult>> ResumeRecoverableAsync(CancellationToken cancellationToken = default) =>
+        RetryRecoverableAsync(cancellationToken);
 
     private async Task<FileOperationResult> RunAsync(FileOperationJob job, CancellationTokenSource cts)
     {
@@ -71,8 +117,8 @@ public sealed class FileOperationManager
                 }
                 switch (job.Kind)
                 {
-                    case FileOperationKind.Copy when conflict && job.Conflict == ConflictAction.Overwrite: await _safe.ReplaceAsync(job.Source, job.Destination, false, token, progress); break;
-                    case FileOperationKind.Move when conflict && job.Conflict == ConflictAction.Overwrite: await _safe.ReplaceAsync(job.Source, job.Destination, true, token, progress); break;
+                    case FileOperationKind.Copy when conflict && job.Conflict is (ConflictAction.Overwrite or ConflictAction.NewerOnly): await _safe.ReplaceAsync(job.Source, job.Destination, false, token, progress); break;
+                    case FileOperationKind.Move when conflict && job.Conflict is (ConflictAction.Overwrite or ConflictAction.NewerOnly): await _safe.ReplaceAsync(job.Source, job.Destination, true, token, progress); break;
                     case FileOperationKind.Copy: await _safe.CopyAsync(job.Source, job.Destination, token, progress); break;
                     case FileOperationKind.Move: await _safe.MoveAsync(job.Source, job.Destination, token, progress); break;
                     case FileOperationKind.Rename: await _safe.RenameAsync(job.Source, Path.GetFileName(job.Destination), token); break;

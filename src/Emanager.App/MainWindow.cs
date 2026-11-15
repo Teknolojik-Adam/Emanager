@@ -71,6 +71,13 @@ public sealed class MainWindow : Window
         new SafeFileOperationsAdapter(),
         new OperationJournal(Path.Combine(UserFolders.ConfigDirectory, "operations.jsonl")),
         maxConcurrency: 2);
+    private readonly TransferCenter transfers;
+    private TransferCenterWindow? transferWindow;
+    private readonly IAndroidMtpService mtpService;
+    private AndroidMtpBrowser? androidMtpBrowser;
+    private bool androidMtpVisible;
+    private IReadOnlyList<AndroidLocation> mtpLocations = [];
+    private bool mtpScanBusy;
     private readonly Button themeBox = new();
     private Button rootModeButton = null!;
     private readonly StackPanel tabStripPanel = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -82,12 +89,16 @@ public sealed class MainWindow : Window
     private IDisposable? searchSubscription;
     private List<(string Path, ClipboardMode Mode)> clipboardFiles = [];
 
-    public MainWindow() : this(null) { }
+    public MainWindow() : this(null, new GioAndroidMtpService()) { }
 
-    private MainWindow(WindowStateSnapshot? restore)
+    public MainWindow(IAndroidMtpService mtpService) : this(null, mtpService) { }
+
+    private MainWindow(WindowStateSnapshot? restore, IAndroidMtpService mtpService)
     {
         restoreState = restore;
+        this.mtpService = mtpService;
         UiText.Use(prefs.Language);
+        transfers = new TransferCenter(operationManager);
         diskOperationService = new PolicyEnforcedDiskMountService(
             storageDiscovery,
             new DiskOperationPolicy(new SystemDiskProtectionService()),
@@ -100,7 +111,7 @@ public sealed class MainWindow : Window
         status.Text = UiText.T("Hazır");
         Title = IsRoot ? "Emanager — Linux [ROOT]" : "Emanager — Linux";
         Width = 1320; Height = 820;
-        MinWidth = 850; MinHeight = 520;
+        MinWidth = 720; MinHeight = 500;
         Background = CanvasBrush;
         BuildUi();
         operationManager.ProgressChanged += ManagedOperationProgress;
@@ -125,11 +136,12 @@ public sealed class MainWindow : Window
             else
                 await RestoreTabsAsync(restoreState);
             await RefreshDevicesAsync();
+            _ = RefreshMtpDevicesAsync();
             if (operationManager.Recoverable.Count > 0)
                 await OperationRecoveryDialog.ShowAsync(this, operationManager);
             deviceTimer.Start();
         };
-        deviceTimer.Tick += (_, _) => _ = RefreshDevicesAsync();
+        deviceTimer.Tick += (_, _) => { _ = RefreshDevicesAsync(); _ = RefreshMtpDevicesAsync(); };
         rootIdleTimer.Tick += async (_, _) =>
         {
             if (!adminMode || rootIdleClosing || !KioAdmin.IsIdleFor(TimeSpan.FromMinutes(5))) return;
@@ -184,7 +196,10 @@ public sealed class MainWindow : Window
     {
         var total = File.Exists(source) ? new FileInfo(source).Length : 0;
         var job = new FileOperationJob(Guid.NewGuid(), kind, source, destination, DateTimeOffset.UtcNow, total, conflict);
+        transfers.RegisterLocal(job);
+        if (transferWindow is not { IsVisible: true }) ShowTransfers();
         var result = await operationManager.EnqueueAsync(job, cancellationToken);
+        transfers.FinishLocal(result);
         if (result.State == FileOperationState.Completed) status.Text = UiText.T("İşlem tamamlandı.");
         else if (result.Error is not null) status.Text = result.Error.Message;
         return result;
@@ -234,11 +249,86 @@ public sealed class MainWindow : Window
         Foreground = TextMuted, VerticalAlignment = VerticalAlignment.Center
     };
 
+    internal TransferCenter Transfers => transfers;
+    internal string CurrentDirectory => ActivePane()?.Path ?? HomePath();
+
+    internal void ShowTransfers()
+    {
+        if (transferWindow is { IsVisible: true }) { transferWindow.Activate(); return; }
+        transferWindow = new TransferCenterWindow(transfers);
+        transferWindow.Closed += (_, _) => transferWindow = null;
+        transferWindow.Show(this);
+    }
+
+    private void ShowAndroidMtp(string? deviceUri = null)
+    {
+        trashVisible = false;
+        androidMtpVisible = true;
+        androidMtpBrowser ??= new AndroidMtpBrowser(this, transfers, mtpService);
+        androidMtpBrowser.UpdateDevices(mtpLocations);
+        RebuildPaneArea();
+        RenderSidebar();
+        if (deviceUri is not null) _ = androidMtpBrowser.OpenLocationAsync(deviceUri);
+    }
+
+    internal async Task RefreshMtpDevicesAsync()
+    {
+        if (mtpScanBusy) return;
+        mtpScanBusy = true;
+        try
+        {
+            IReadOnlyList<AndroidLocation> current;
+            if (!mtpService.HasBackend) current = Array.Empty<AndroidLocation>();
+            else
+            {
+                using var timeout = new CancellationTokenSource();
+                var scan = mtpService.DiscoverAsync(timeout.Token);
+                try { current = await scan.WaitAsync(TimeSpan.FromSeconds(10)); }
+                catch (TimeoutException)
+                {
+                    timeout.Cancel();
+                    _ = scan.ContinueWith(task => _ = task.Exception, CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    throw new TimeoutException("Android MTP discovery timed out after 10 seconds.");
+                }
+            }
+            if (mtpLocations.SequenceEqual(current)) return;
+            mtpLocations = current.ToArray();
+            androidMtpBrowser?.UpdateDevices(mtpLocations);
+            RenderSidebar();
+        }
+        catch (Exception ex)
+        {
+            // Discovery failures must not erase the last known device snapshot.
+            status.Text = UiText.T("Android MTP taraması başarısız: ") + ex.Message;
+        }
+        finally { mtpScanBusy = false; }
+    }
+
+    internal IReadOnlyList<StorageNode> RemovableStorageNodes() => UserStorageNodes()
+        .Where(x => x.IsPhysicalDisk && x.IsRemovable).ToArray();
+
+    internal Task RefreshUsbSnapshotAsync() => RefreshDevicesAsync();
+
+    internal async Task OpenRemovableAsync(string id)
+    {
+        await RefreshDevicesAsync();
+        if (storageSnapshot?.Nodes.FirstOrDefault(x => x.StableId == id && x.IsRemovable) is { } node)
+            await OpenStorageNodeAsync(node);
+    }
+
+    internal async Task EjectRemovableAsync(string id)
+    {
+        await RefreshDevicesAsync();
+        if (storageSnapshot?.Nodes.FirstOrDefault(x => x.StableId == id && x.IsRemovable) is { } node)
+            await ExecuteStorageOperationAsync(node, DiskOperationKind.Eject);
+    }
+
     private void BuildUi()
     {
         var shell = new Grid
         {
-            RowDefinitions = new RowDefinitions("86,66,0,*,Auto,42"),
+            RowDefinitions = new RowDefinitions("58,50,0,*,Auto,38"),
             ColumnDefinitions = new ColumnDefinitions("235,5,*"),
             Background = CanvasBrush
         };
@@ -249,25 +339,25 @@ public sealed class MainWindow : Window
         {
             Background = SidebarBrush, BorderBrush = StrokeBrush,
             BorderThickness = new Thickness(0, 0, 0, 1),
-            Padding = new Thickness(28, 0)
+            Padding = new Thickness(16, 0)
         };
         Grid.SetColumnSpan(masthead, 3);
-        var mastRow = new Grid { ColumnDefinitions = new ColumnDefinitions("6,*,Auto,Auto") };
-        var accentLine = new Border { Background = AccentBrush, CornerRadius = new CornerRadius(3), Margin = new Thickness(0, 16, 0, 16) };
+        var mastRow = new Grid { ColumnDefinitions = new ColumnDefinitions("4,*,Auto,Auto") };
+        var accentLine = new Border { Background = AccentBrush, CornerRadius = new CornerRadius(2), Margin = new Thickness(0, 11, 0, 11) };
         mastRow.Children.Add(accentLine);
         var brand = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, VerticalAlignment = VerticalAlignment.Center };
         brand.Children.Add(new Border
         {
-            Width = 48, Height = 48, CornerRadius = new CornerRadius(15), Background = AccentBrush,
+            Width = 36, Height = 36, CornerRadius = new CornerRadius(11), Background = AccentBrush,
             Child = new TextBlock
             {
-                Text = "E", FontSize = 27, FontWeight = FontWeight.Bold, Foreground = CanvasBrush,
+                Text = "E", FontSize = 20, FontWeight = FontWeight.Bold, Foreground = CanvasBrush,
                 HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
             }
         });
         var brandText = new StackPanel { Spacing = 0, VerticalAlignment = VerticalAlignment.Center };
-        brandText.Children.Add(new TextBlock { Text = "Emanager", FontSize = 25, FontWeight = FontWeight.Bold, Foreground = TextPrimary });
-        brandText.Children.Add(new TextBlock { Text = UiText.T("LINUX DOSYA YÖNETİCİSİ"), FontSize = 11, LetterSpacing = 1.7, Foreground = AccentBrush });
+        brandText.Children.Add(new TextBlock { Text = "Emanager", FontSize = 19, FontWeight = FontWeight.Bold, Foreground = TextPrimary });
+        brandText.Children.Add(new TextBlock { Text = UiText.T("Linux dosya yöneticisi"), FontSize = 10, Foreground = TextMuted });
         brand.Children.Add(brandText);
         Grid.SetColumn(brand, 1);
         brand.Margin = new Thickness(18, 0, 0, 0);
@@ -488,7 +578,7 @@ public sealed class MainWindow : Window
         if (Avalonia.Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             // Show replacement first so shutting the old main window cannot exit the app.
-            var replacement = new MainWindow(state)
+            var replacement = new MainWindow(state, new GioAndroidMtpService())
             {
                 Width = Width,
                 Height = Height,
@@ -515,6 +605,7 @@ public sealed class MainWindow : Window
     private async Task NewTabAsync(string path)
     {
         trashVisible = false;
+        androidMtpVisible = false;
         var left = CreatePane();
         tabs.Add((left, null));
         ActiveTabIndex = tabs.Count - 1;
@@ -528,6 +619,7 @@ public sealed class MainWindow : Window
     {
         if (index < 0 || index >= tabs.Count || (index == ActiveTabIndex && active == tabs[index].Left)) return;
         trashVisible = false;
+        androidMtpVisible = false;
         ActiveTabIndex = index;
         var (left, right) = tabs[index];
         active = right ?? left;
@@ -585,6 +677,16 @@ public sealed class MainWindow : Window
         pathBox.Text = pane.Path;
     }
 
+    internal FilePane? GetOtherPane(FilePane pane)
+    {
+        foreach (var (left, right) in tabs)
+        {
+            if (ReferenceEquals(left, pane)) return right;
+            if (right is not null && ReferenceEquals(right, pane)) return left;
+        }
+        return null;
+    }
+
     private void FocusOtherPane()
     {
         var (left, right) = ActiveTabIndex < tabs.Count ? tabs[ActiveTabIndex] : (panes.FirstOrDefault()!, null);
@@ -599,6 +701,14 @@ public sealed class MainWindow : Window
     {
         paneArea.Children.Clear();
         paneArea.ColumnDefinitions = new ColumnDefinitions();
+        if (androidMtpVisible)
+        {
+            paneArea.ColumnDefinitions = new ColumnDefinitions("*");
+            androidMtpBrowser ??= new AndroidMtpBrowser(this, transfers, mtpService);
+            Grid.SetColumn(androidMtpBrowser, 0);
+            paneArea.Children.Add(androidMtpBrowser);
+            return;
+        }
         if (trashVisible)
         {
             paneArea.ColumnDefinitions = new ColumnDefinitions("*");
@@ -1197,11 +1307,41 @@ public sealed class MainWindow : Window
         pinButton.Foreground = AccentBrush;
         sidebar.Children.Add(pinButton);
         SidebarLabel("BU BİLGİSAYAR");
+        var jobsButton = MakeBtn("⇅  Transferler", ShowTransfers, "Aktarım kuyruğu, hız, duraklatma ve iptal");
+        jobsButton.HorizontalAlignment = HorizontalAlignment.Stretch;
+        jobsButton.Background = Brushes.Transparent;
+        jobsButton.BorderThickness = new Thickness(0);
+        sidebar.Children.Add(jobsButton);
+        SidebarLabel("CİHAZLAR");
+        var storageGroup = new StackPanel { Spacing = 1 };
+        var scanPhones = MakeBtn("↻  Yenile", () => { _ = RefreshMtpDevicesAsync(); _ = RefreshDevicesAsync(); }, "Cihaz listesini yenile");
+        scanPhones.HorizontalAlignment = HorizontalAlignment.Stretch;
+        scanPhones.HorizontalContentAlignment = HorizontalAlignment.Left;
+        scanPhones.Background = Brushes.Transparent;
+        scanPhones.BorderThickness = new Thickness(0);
+        scanPhones.Foreground = AccentBrush;
+        storageGroup.Children.Add(scanPhones);
+        var hasDeviceEntry = false;
+        foreach (var device in mtpLocations)
+        {
+            var location = device;
+            var row = MakeBtn("▣  " + location.Name, () => ShowAndroidMtp(location.Uri), location.Uri);
+            row.HorizontalAlignment = HorizontalAlignment.Stretch;
+            row.HorizontalContentAlignment = HorizontalAlignment.Left;
+            row.Background = androidMtpVisible && androidMtpBrowser?.SelectedDeviceUri == location.Uri ? SurfaceBrush : Brushes.Transparent;
+            row.BorderBrush = androidMtpVisible && androidMtpBrowser?.SelectedDeviceUri == location.Uri ? AccentBrush : StrokeBrush;
+            row.BorderThickness = androidMtpVisible && androidMtpBrowser?.SelectedDeviceUri == location.Uri ? new Thickness(1) : new Thickness(0);
+            row.Foreground = TextPrimary;
+            storageGroup.Children.Add(row);
+            hasDeviceEntry = true;
+        }
+
         var storageNodes = UserStorageNodes();
         var visibleById = storageNodes.ToDictionary(x => x.StableId, StringComparer.Ordinal);
         var rendered = new HashSet<string>(StringComparer.Ordinal);
-        var storageGroup = new StackPanel { Spacing = 1 };
         var hasStorageEntry = false;
+        if (mtpLocations.Count > 0 && storageNodes.Count > 0)
+            storageGroup.Children.Add(new Border { Height = 1, Background = StrokeBrush, Margin = new Thickness(8, 4) });
         foreach (var disk in storageNodes.Where(x => x.IsPhysicalDisk))
         {
             if (hasStorageEntry)
@@ -1219,7 +1359,10 @@ public sealed class MainWindow : Window
             AddStorageTree(storageGroup, node, 0, visibleById, rendered);
             hasStorageEntry = true;
         }
-        if (hasStorageEntry)
+        hasDeviceEntry |= hasStorageEntry;
+        if (!hasDeviceEntry)
+            storageGroup.Children.Add(new TextBlock { Text = "Bağlı cihaz yok", FontSize = 12, Foreground = TextMuted, Margin = new Thickness(13, 3) });
+        if (storageGroup.Children.Count > 0)
             sidebar.Children.Add(new Border
             {
                 Background = SurfaceBrush,
@@ -1267,6 +1410,7 @@ public sealed class MainWindow : Window
 
     private void ShowTrash()
     {
+        androidMtpVisible = false;
         trashVisible = true;
         trashView ??= new TrashView(this);
         trashView.Reload();

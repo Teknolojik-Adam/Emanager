@@ -32,7 +32,40 @@ public sealed class DuplicateFinder : IDuplicateFinder
     {
         if (!OperatingSystem.IsLinux()) return null;
         var executable = new[] { "/usr/bin/stat", "/bin/stat" }.FirstOrDefault(File.Exists); if (executable is null) return null;
-        var start = new System.Diagnostics.ProcessStartInfo(executable, $"-c %d:%i {path}") { RedirectStandardOutput = true, UseShellExecute = false };
-        using var process = System.Diagnostics.Process.Start(start); if (process is null) return null; var value = await process.StandardOutput.ReadToEndAsync(token); await process.WaitForExitAsync(token); return process.ExitCode == 0 ? value.Trim() : null;
+        var start = new System.Diagnostics.ProcessStartInfo(executable) { RedirectStandardOutput = true, UseShellExecute = false };
+        start.ArgumentList.Add("-c");
+        start.ArgumentList.Add("%d:%i");
+        start.ArgumentList.Add("--");
+        start.ArgumentList.Add(path);
+        using var process = System.Diagnostics.Process.Start(start); if (process is null) return null;
+        var value = await ReadProcessOutputAsync(process, token);
+        return process.ExitCode == 0 ? value.Trim() : null;
+    }
+
+    private static async Task<string> ReadProcessOutputAsync(System.Diagnostics.Process process, CancellationToken token)
+    {
+        Task<string>? outputTask = null;
+        try
+        {
+            outputTask = process.StandardOutput.ReadToEndAsync(token);
+            await process.WaitForExitAsync(token);
+            return await outputTask;
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException) { }
+
+            await process.WaitForExitAsync(CancellationToken.None);
+            if (outputTask is not null)
+            {
+                try { await outputTask; }
+                catch (OperationCanceledException) { }
+            }
+            throw;
+        }
     }
 }

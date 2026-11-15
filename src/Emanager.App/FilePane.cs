@@ -25,6 +25,26 @@ namespace Emanager.App;
 
 public enum ClipboardMode { Copy, Cut }
 
+public enum PasteItemState { Completed, Skipped, Failed }
+public sealed record PasteItemOutcome(string Path, ClipboardMode Mode, PasteItemState State, string? Error = null);
+
+public sealed class PasteBatchOutcomes
+{
+    private readonly List<PasteItemOutcome> items = [];
+    public IReadOnlyList<PasteItemOutcome> Items => items;
+    public int CompletedCount => items.Count(x => x.State == PasteItemState.Completed);
+    public int SkippedCount => items.Count(x => x.State == PasteItemState.Skipped);
+    public int FailedCount => items.Count(x => x.State == PasteItemState.Failed);
+    public IReadOnlyList<string> PendingCutPaths => items
+        .Where(x => x.Mode == ClipboardMode.Cut && x.State != PasteItemState.Completed)
+        .Select(x => x.Path).ToArray();
+
+    public void RecordCompleted(string path, ClipboardMode mode) => items.Add(new(path, mode, PasteItemState.Completed));
+    public void RecordSkipped(string path, ClipboardMode mode) => items.Add(new(path, mode, PasteItemState.Skipped));
+    public void RecordFailed(string path, ClipboardMode mode, Exception error) =>
+        items.Add(new(path, mode, PasteItemState.Failed, error.Message));
+}
+
 public sealed record NavigationResult(bool Succeeded, string? ErrorMessage = null)
 {
     public static NavigationResult Success() => new(true);
@@ -459,6 +479,7 @@ public sealed class FilePane : UserControl
         other.Items.Add(Make("Etiketler…", () => _ = EditTagsAsync()));
         other.Items.Add(Make("Tekrarlanan dosyaları bul…", () => _ = DuplicateFinderDialog.ShowAsync(this, Path)));
         other.Items.Add(Make("Klasörleri karşılaştır…", () => _ = CompareFoldersAsync()));
+        other.Items.Add(Make("Klasörleri eşitle…", () => _ = EqualizeFoldersAsync()));
         other.Items.Add(Make("İzinler (chmod)…", () => _ = ChmodSelectedAsync()));
         other.Items.Add(Make("Bu klasörü sabitle", PinCurrent));
         other.Items.Add(Make("Terminali burada aç", OpenTerminal));
@@ -524,6 +545,21 @@ public sealed class FilePane : UserControl
         var other = await InputDialog.ShowAsync(this, UiText.T("Klasör karşılaştır"), Path, UiText.T("Karşılaştırılacak ikinci klasör yolu:"));
         if (string.IsNullOrWhiteSpace(other) || !Directory.Exists(other)) { ReportStatus(UiText.T("Geçerli bir klasör seçilmedi.")); return; }
         await FolderCompareDialog.ShowAsync(this, Path, other);
+    }
+
+    private async Task EqualizeFoldersAsync()
+    {
+        var otherPane = win.GetOtherPane(this);
+        var suggested = otherPane is not null && otherPane.Path != Path ? otherPane.Path : string.Empty;
+        var target = await InputDialog.ShowAsync(this, UiText.T("Klasör eşitleme"), suggested, UiText.T("Eşitlenecek hedef klasör yolu:"));
+        if (string.IsNullOrWhiteSpace(target) || !Directory.Exists(target)) { ReportStatus(UiText.T("Geçerli bir klasör seçilmedi.")); return; }
+        if (FileSystem.IsSubpath(Path, target) || FileSystem.IsSubpath(target, Path))
+        {
+            await MessageDialog.ShowAsync(this, UiText.T("Klasör eşitleme"), UiText.T("Kaynak ve hedef aynı veya iç içe klasör olamaz."));
+            return;
+        }
+        await FolderEqualizeDialog.ShowAsync(this, Path, target);
+        await RefreshAsync();
     }
 
     public async Task<NavigationResult> NavigateAsync(string path, bool record = true, int historyDelta = 0, bool resolveRelative = false)
@@ -804,15 +840,15 @@ public sealed class FilePane : UserControl
             if (!KioAdmin.Enabled) return;
         }
         var total = clipboard.Count;
-        var done = 0;
-        var failures = new List<string>();
+        var outcomes = new PasteBatchOutcomes();
         var undoSteps = new List<FileUndo.Step>();
         ConflictAction? applyToAll = null;
         try
         {
-            foreach (var (source, mode) in clipboard)
+            for (var index = 0; index < clipboard.Count; index++)
             {
-                ReportStatus(UiText.F("Yapıştırılıyor… {0}/{1}", done + 1, total));
+                var (source, mode) = clipboard[index];
+                ReportStatus(UiText.F("Yapıştırılıyor… {0}/{1}", index + 1, total));
                 try
                 {
                     if (admin)
@@ -829,28 +865,58 @@ public sealed class FilePane : UserControl
                         {
                             var sourceInfo = new FileInfo(source); var targetInfo = new FileInfo(targetPath);
                             var choice = await ConflictDialog.ShowAsync(this, new FileConflict(source, targetPath, sourceInfo.Exists ? sourceInfo.Length : 0, targetInfo.Exists ? targetInfo.Length : 0, sourceInfo.Exists ? new DateTimeOffset(sourceInfo.LastWriteTimeUtc) : DateTimeOffset.MinValue, targetInfo.Exists ? new DateTimeOffset(targetInfo.LastWriteTimeUtc) : DateTimeOffset.MinValue));
-                            if (choice.Action is null) break;
+                            if (choice.Action is null)
+                            {
+                                for (var pendingIndex = index; pendingIndex < clipboard.Count; pendingIndex++)
+                                    outcomes.RecordSkipped(clipboard[pendingIndex].Path, clipboard[pendingIndex].Mode);
+                                break;
+                            }
                             conflict = choice.Action; if (choice.ApplyToAll) applyToAll = conflict;
                         }
-                        if (conflict == ConflictAction.Skip) { done++; continue; }
+                        if (conflict == ConflictAction.Skip)
+                        {
+                            outcomes.RecordSkipped(source, mode);
+                            continue;
+                        }
                         var result = await win.RunManagedOperationAsync(operation, source, Path, conflict);
+                        if (result.State == FileOperationState.Skipped)
+                        {
+                            outcomes.RecordSkipped(source, mode);
+                            continue;
+                        }
                         if (result.State != FileOperationState.Completed)
                             throw result.Error ?? new IOException("Dosya işlemi tamamlanamadı.");
                     }
                     undoSteps.Add(new FileUndo.Step(mode == ClipboardMode.Cut ? FileUndo.Kind.Move : FileUndo.Kind.Copy,
                         source, System.IO.Path.Combine(Path, System.IO.Path.GetFileName(source))));
+                    outcomes.RecordCompleted(source, mode);
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or TimeoutException or OperationCanceledException)
                 {
-                    failures.Add($"{System.IO.Path.GetFileName(source)}: {ex.Message}");
+                    outcomes.RecordFailed(source, mode, ex);
                 }
-                done++;
             }
             if (!admin) win.UndoHistory.Record(undoSteps);
-            if (win.ClipboardMode == ClipboardMode.Cut) win.ClearClipboard();
+            if (clipboard.Any(x => x.Mode == ClipboardMode.Cut))
+            {
+                if (outcomes.PendingCutPaths.Count == 0) win.ClearClipboard();
+                else await win.SetClipboardAsync(outcomes.PendingCutPaths, ClipboardMode.Cut, this);
+            }
             await RefreshAsync();
-            if (failures.Count > 0)
-                await MessageDialog.ShowAsync(this, "Yapıştırma", UiText.F("{0}/{1} öğe aktarıldı.\n\nAtlananlar:\n{2}", done - failures.Count, total, string.Join("\n", failures)));
+            var summary = UiText.F("{0} tamamlandı · {1} atlandı · {2} başarısız",
+                outcomes.CompletedCount, outcomes.SkippedCount, outcomes.FailedCount);
+            ReportStatus(summary);
+            if (outcomes.SkippedCount > 0 || outcomes.FailedCount > 0)
+            {
+                var details = new List<string> { summary };
+                if (outcomes.SkippedCount > 0)
+                    details.Add("\n" + UiText.T("Atlananlar:") + "\n" + string.Join("\n",
+                        outcomes.Items.Where(x => x.State == PasteItemState.Skipped).Select(x => x.Path)));
+                if (outcomes.FailedCount > 0)
+                    details.Add("\n" + UiText.T("Başarısızlar:") + "\n" + string.Join("\n",
+                        outcomes.Items.Where(x => x.State == PasteItemState.Failed).Select(x => $"{x.Path}: {x.Error}")));
+                await MessageDialog.ShowAsync(this, UiText.T("Yapıştırma"), string.Join("\n", details));
+            }
             list.Focus();
         }
         catch (Exception ex)
@@ -1256,13 +1322,13 @@ public sealed record ConflictDialogResult(ConflictAction? Action, bool ApplyToAl
 
 public static class ConflictDialog
 {
-    public static async Task<ConflictDialogResult> ShowAsync(Control owner, FileConflict conflict)
+    public static async Task<ConflictDialogResult> ShowAsync(Control owner, FileConflict conflict, bool allowApplyToAll = true)
     {
         var window = owner as Window ?? TopLevel.GetTopLevel(owner) as Window;
         if (window is null) return new(null, false);
         var result = new ConflictDialogResult(null, false);
         var dialog = new Window { Title = UiText.T("Dosya çakışması"), Width = 650, SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = MainWindow.SidebarBrush, CanResize = false };
-        var all = new CheckBox { Content = UiText.T("Bu kararı tüm çakışmalara uygula"), Margin = new Thickness(20, 0, 20, 12) };
+        var all = new CheckBox { Content = UiText.T("Bu kararı tüm çakışmalara uygula"), Margin = new Thickness(20, 0, 20, 12), IsVisible = allowApplyToAll };
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(20, 0, 20, 18) };
         void Add(string label, ConflictAction? action, bool primary = false) { var button = new Button { Content = label, Padding = new Thickness(12, 7), Background = primary ? MainWindow.AccentBrush : MainWindow.SurfaceBrush, Foreground = primary ? MainWindow.CanvasBrush : MainWindow.TextPrimary }; button.Click += (_, _) => { result = new(action, all.IsChecked == true); dialog.Close(); }; buttons.Children.Add(button); }
         Add(UiText.T("Atla"), ConflictAction.Skip); Add(UiText.T("Daha yenisini koru"), ConflictAction.NewerOnly); Add(UiText.T("Üzerine yaz"), ConflictAction.Overwrite, true); Add(UiText.T("Vazgeç"), null);
@@ -1273,6 +1339,21 @@ public static class ConflictDialog
 
 public static class DuplicateFinderDialog
 {
+    public sealed record CleanupFailure(string Path, string Error);
+    public sealed record CleanupResult(IReadOnlyList<string> Removed, IReadOnlyList<CleanupFailure> Failed);
+
+    public static CleanupResult CleanupSelected(IEnumerable<string> selected, Action<string> trash)
+    {
+        var removed = new List<string>();
+        var failed = new List<CleanupFailure>();
+        foreach (var path in selected)
+        {
+            try { trash(path); removed.Add(path); }
+            catch (Exception ex) { failed.Add(new(path, ex.Message)); }
+        }
+        return new(removed, failed);
+    }
+
     public static async Task ShowAsync(Control owner, string root)
     {
         var window = owner as Window ?? TopLevel.GetTopLevel(owner) as Window;
@@ -1292,9 +1373,12 @@ public static class DuplicateFinderDialog
         trash.Click += (_, _) =>
         {
             var selected = results.SelectedItems?.OfType<string>().ToArray() ?? Array.Empty<string>();
-            foreach (var path in selected) { try { SafeFileOperations.Trash(path); } catch { } }
-            status.Text = UiText.F("{0} öğe Çöp Kutusuna taşındı. Kalıcı silme yapılmadı.", selected.Length);
-            results.ItemsSource = paths.Except(selected, StringComparer.Ordinal).ToArray();
+            var cleanup = CleanupSelected(selected, path => SafeFileOperations.Trash(path));
+            status.Text = UiText.F("{0} öğe Çöp Kutusuna taşındı · {1} öğe başarısız. Kalıcı silme yapılmadı.", cleanup.Removed.Count, cleanup.Failed.Count);
+            if (cleanup.Failed.Count > 0)
+                status.Text += "\n" + string.Join("\n", cleanup.Failed.Select(x => $"{x.Path}: {x.Error}"));
+            results.ItemsSource = paths.Except(cleanup.Removed, StringComparer.Ordinal).ToArray();
+            trash.IsEnabled = results.ItemsSource is IEnumerable<string> remaining && remaining.Any();
         };
         await dialog.ShowDialog(window); window.Focus();
     }
@@ -1331,6 +1415,105 @@ public static class FolderCompareDialog
             catch (Exception ex) { status.Text = UiText.T("Eşitleme başarısız: ") + ex.Message; }
         };
         await dialog.ShowDialog(window); window.Focus();
+    }
+}
+
+public static class FolderEqualizeDialog
+{
+    public static async Task ShowAsync(Control owner, string source, string target)
+    {
+        var window = owner as Window ?? TopLevel.GetTopLevel(owner) as Window;
+        if (window is null) return;
+        var dialog = new Window { Title = UiText.T("Klasör eşitleme"), Width = 900, Height = 620, WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = MainWindow.SidebarBrush };
+        var header = new TextBlock
+        {
+            Text = UiText.F("Kaynak: {0}\nHedef: {1}", source, target),
+            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(16, 12, 16, 0), Foreground = MainWindow.TextPrimary, FontWeight = FontWeight.SemiBold
+        };
+        var list = new ListBox { Margin = new Thickness(16) };
+        var status = new TextBlock { Text = UiText.T("Planlanıyor…"), Margin = new Thickness(16, 12, 16, 0), Foreground = MainWindow.TextMuted, TextWrapping = TextWrapping.Wrap };
+        var direction = new ComboBox { ItemsSource = new[] { UiText.T("Kaynak → Hedef"), UiText.T("Hedef → Kaynak") }, SelectedIndex = 0, Width = 180 };
+        var mode = new ComboBox { ItemsSource = new[] { UiText.T("Birleştir (silme yok)"), UiText.T("Eşitle (fazlalıklar silinir)") }, SelectedIndex = 1, Width = 260 };
+        var apply = new Button { Content = UiText.T("Planı uygula"), Padding = new Thickness(14, 7), IsEnabled = false };
+        var close = new Button { Content = UiText.T("Kapat"), Padding = new Thickness(14, 7) }; close.Click += (_, _) => dialog.Close();
+        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Margin = new Thickness(16, 0, 16, 12) };
+        controls.Children.Add(new TextBlock { Text = UiText.T("Yön:"), Foreground = MainWindow.TextMuted, VerticalAlignment = VerticalAlignment.Center });
+        controls.Children.Add(direction);
+        controls.Children.Add(new TextBlock { Text = UiText.T("Mod:"), Foreground = MainWindow.TextMuted, VerticalAlignment = VerticalAlignment.Center });
+        controls.Children.Add(mode);
+        controls.Children.Add(apply); controls.Children.Add(close);
+        var layout = new DockPanel();
+        DockPanel.SetDock(header, Dock.Top); DockPanel.SetDock(status, Dock.Top); DockPanel.SetDock(controls, Dock.Bottom);
+        layout.Children.Add(header); layout.Children.Add(status); layout.Children.Add(controls); layout.Children.Add(list);
+        dialog.Content = layout;
+        var entries = await Task.Run(() => new FolderComparisonService().CompareAsync(source, target));
+        SyncPlan currentPlan = new(Array.Empty<SyncAction>());
+        string currentDestinationRoot = target;
+        void RefreshPlan()
+        {
+            var dir = direction.SelectedIndex == 1 ? SyncDirection.RightToLeft : SyncDirection.LeftToRight;
+            var syncMode = mode.SelectedIndex == 0 ? SyncMode.Merge : SyncMode.Mirror;
+            currentDestinationRoot = dir == SyncDirection.RightToLeft ? source : target;
+            currentPlan = new FolderSyncPlanner().Plan(entries, dir, syncMode);
+            list.ItemsSource = currentPlan.Actions.Select(x => $"{x.Kind}: {x.Source}  →  {x.Destination}{(x.RequiresConfirmation ? "  [confirmation]" : "")}").ToArray();
+            status.Text = currentPlan.Actions.Count == 0
+                ? UiText.T("Planlanacak işlem yok — klasörler zaten eşit.")
+                : UiText.F("{0} planlı işlem · Planı uygula düğmesine basılana kadar değişiklik yok", currentPlan.Actions.Count);
+            apply.IsEnabled = currentPlan.Actions.Count > 0;
+        }
+        RefreshPlan(); direction.SelectionChanged += (_, _) => RefreshPlan(); mode.SelectionChanged += (_, _) => RefreshPlan();
+        apply.Click += async (_, _) =>
+        {
+            var plan = currentPlan;
+            if (plan.Actions.Count == 0) return;
+            var backupRoot = PrepareBackupRoot();
+            var message = UiText.T("Dosyalar kopyalanabilir, üzerine yazılabilir veya silinebilir.") + "\n"
+                + UiText.F("Yazılan veya silinen dosyaların yedeği şuraya alınır: {0}", backupRoot);
+            if (!await ConfirmDialog.ShowAsync(dialog, UiText.T("Eşitleme"), message, UiText.T("Uygula"), dangerous: true)) return;
+            apply.IsEnabled = false; direction.IsEnabled = false; mode.IsEnabled = false;
+            try
+            {
+                var backedUp = await BackupDestructiveTargetsAsync(plan, currentDestinationRoot, backupRoot);
+                status.Text = UiText.F("{0} dosya yedeklendi.", backedUp);
+                var completed = await new FolderSyncExecutor().ExecuteAsync(plan, true, action =>
+                {
+                    Dispatcher.UIThread.Post(() => status.Text = UiText.F("Uygulanıyor: {0}", action.Destination));
+                    return Task.CompletedTask;
+                });
+                status.Text = UiText.F("{0} işlem uygulandı. Yedek klasörü: {1}", completed.Count, backupRoot);
+            }
+            catch (Exception ex)
+            {
+                status.Text = UiText.T("Eşitleme başarısız: ") + ex.Message;
+                apply.IsEnabled = true;
+            }
+        };
+        await dialog.ShowDialog(window); window.Focus();
+    }
+
+    internal static string PrepareBackupRoot()
+    {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "emanager", "sync-backups", DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+        Directory.CreateDirectory(root);
+        return root;
+    }
+
+    private static async Task<int> BackupDestructiveTargetsAsync(SyncPlan plan, string destinationRoot, string backupRoot)
+    {
+        var count = 0;
+        foreach (var action in plan.Actions)
+        {
+            if (action.Kind is not (SyncActionKind.Overwrite or SyncActionKind.Delete)) continue;
+            if (!File.Exists(action.Destination)) continue;
+            var relative = Path.GetRelativePath(destinationRoot, action.Destination);
+            if (relative == "." || relative.StartsWith("..", StringComparison.Ordinal)) continue;
+            var directory = Path.Combine(backupRoot, Path.GetDirectoryName(relative) ?? string.Empty);
+            Directory.CreateDirectory(directory);
+            await SafeFileOperations.CopyFileAsync(action.Destination, directory);
+            count++;
+        }
+        return count;
     }
 }
 
